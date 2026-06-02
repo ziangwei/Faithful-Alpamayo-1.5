@@ -18,9 +18,9 @@ src/
 
 ```text
 models/
-  huggingface/
-    hub/        # Alpamayo, Qwen processor, and other HF model repos
-    xet/        # HF Xet chunk cache for model downloads
+  # Reserved for project-local model copies if needed later.
+  # The default server setup uses the existing shared HF cache at:
+  # /dss/dssfs05/pn39qo/pn39qo-dss-0001/huggingface/hub
 
 data/
   clips/        # selected/extracted project clips
@@ -55,8 +55,10 @@ cd /dss/dssfs05/pn39qo/pn39qo-dss-0001/di97fer/projects_for_test/Faithful-Alpama
 source scripts/server_env.sh
 ```
 
-`scripts/server_env.sh` sets model downloads to `./models` and dataset/cache
-paths to `./data`. It does not put checkpoints or adapters under `data`.
+`scripts/server_env.sh` points Hugging Face model/cache reads to the existing
+shared cache at `/dss/dssfs05/pn39qo/pn39qo-dss-0001/huggingface/hub`.
+Project-generated data stays under `./data`. It does not put checkpoints or
+adapters under `data`.
 
 For fragile interactive sessions, pre-download model files before running
 inference:
