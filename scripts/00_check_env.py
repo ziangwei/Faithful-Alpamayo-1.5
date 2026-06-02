@@ -41,9 +41,15 @@ def build_report() -> dict[str, Any]:
         },
         "commands": {
             "uv": shutil.which("uv"),
+            "conda": shutil.which("conda"),
             "hf": shutil.which("hf"),
             "git": shutil.which("git"),
             "nvcc": shutil.which("nvcc"),
+        },
+        "environment": {
+            "conda_default_env": os.environ.get("CONDA_DEFAULT_ENV"),
+            "conda_prefix": os.environ.get("CONDA_PREFIX"),
+            "virtual_env": os.environ.get("VIRTUAL_ENV"),
         },
         "modules": {name: module_available(name) for name in OPTIONAL_MODULES},
         "huggingface": {
@@ -75,14 +81,28 @@ def build_report() -> dict[str, Any]:
     return report
 
 
+def has_environment_manager(report: dict[str, Any]) -> bool:
+    """Return whether uv, conda, or an active virtual environment is available."""
+    commands = report["commands"]
+    environment = report["environment"]
+    return bool(
+        commands.get("uv")
+        or commands.get("conda")
+        or environment.get("conda_prefix")
+        or environment.get("virtual_env")
+    )
+
+
 def find_failures(report: dict[str, Any], strict: bool) -> list[str]:
     """Return environment failures."""
     failures: list[str] = []
     if not report["python"]["version_ok"]:
         failures.append("Python version is not 3.12.*")
     if strict:
-        for command in ("uv", "hf", "git"):
-            if not report["commands"][command]:
+        if not has_environment_manager(report):
+            failures.append("Missing environment manager: uv, conda, or active virtual environment")
+        for command in ("hf", "git"):
+            if not report["commands"].get(command):
                 failures.append(f"Missing command: {command}")
         for module in ("torch", "transformers", "physical_ai_av"):
             if not report["modules"][module]:
@@ -118,4 +138,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
