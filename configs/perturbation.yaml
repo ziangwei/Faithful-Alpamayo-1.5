@@ -1,0 +1,41 @@
+perturbations:
+  brightness:
+    enabled: true
+    factors:
+      - 0.75
+      - 1.25
+  contrast:
+    enabled: true
+    factors:
+      - 0.75
+      - 1.25
+  gaussian_noise:
+    enabled: true
+    std:
+      - 0.01
+      - 0.03
+  blur:
+    enabled: true
+    kernel_sizes:
+      - 3
+      - 5
+  fog_overlay:
+    enabled: false
+    strengths:
+      - 0.2
+  camera_dropout:
+    enabled: false
+    require_model_support: true
+
+evaluation:
+  compare_against_clean: true
+  metrics:
+    - trajectory_deviation
+    - intent_flip_rate
+    - reasoning_action_change_rate
+    - ade_change
+    - fde_change
+
+outputs:
+  jsonl: outputs/metrics/perturbation_results.jsonl
+

@@ -1,0 +1,63 @@
+trajectory:
+  time_step: 0.1
+  use_xy_only: true
+  compute_ade: true
+  compute_fde: true
+  compute_speed: true
+  compute_acceleration: true
+  compute_jerk: true
+  compute_lateral_displacement: true
+
+intent_parser:
+  text_fields:
+    - cot
+    - meta_action
+  intents:
+    stop:
+      - stop
+      - stopped
+      - full stop
+    slow_down:
+      - slow down
+      - slowing
+      - brake
+      - decelerate
+    yield:
+      - yield
+      - give way
+    avoid:
+      - avoid
+      - steer around
+      - obstacle
+    lane_change_left:
+      - change lane left
+      - lane change left
+      - move left
+    lane_change_right:
+      - change lane right
+      - lane change right
+      - move right
+    turn_left:
+      - turn left
+      - left turn
+    turn_right:
+      - turn right
+      - right turn
+    go_straight:
+      - go straight
+      - proceed
+      - continue straight
+
+consistency_thresholds:
+  stop_final_speed_mps_max: 0.5
+  slow_down_speed_delta_mps_min: 1.0
+  yield_speed_delta_mps_min: 0.5
+  lane_change_lateral_m_min: 1.0
+  turn_heading_change_rad_min: 0.35
+  avoid_adjustment_lateral_m_min: 0.6
+  avoid_adjustment_speed_delta_mps_min: 0.5
+
+outputs:
+  summary_json: outputs/metrics/summary.json
+  inconsistency_examples_jsonl: outputs/metrics/inconsistency_examples.jsonl
+

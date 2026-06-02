@@ -1,0 +1,33 @@
+model:
+  model_id: nvidia/Alpamayo-1.5-10B
+  dtype: bfloat16
+  attn_implementation: flash_attention_2
+  sdpa_fallback: true
+
+runtime:
+  device: cuda
+  seed: 42
+  require_execute_flag: true
+  local_downloads_allowed: false
+
+data:
+  manifest: data/manifests/manifest_300clips.jsonl
+  num_history_steps: 16
+  num_future_steps: 64
+  time_step: 0.1
+  num_frames_per_camera: 4
+
+sampling:
+  top_p: 0.98
+  top_k: null
+  temperature: 0.6
+  num_traj_samples: 1
+  num_traj_sets: 1
+  max_generation_length: 256
+  return_extra: true
+
+outputs:
+  jsonl: outputs/baseline/predictions.jsonl
+  trajectories_npz: outputs/baseline/trajectories.npz
+  runtime_jsonl: outputs/baseline/runtime.jsonl
+

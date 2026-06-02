@@ -1,0 +1,37 @@
+project:
+  name: Faithful-Alpamayo-1.5
+
+dataset:
+  hf_dataset: nvidia/PhysicalAI-Autonomous-Vehicles
+  target_num_clips: 300
+  split_counts:
+    train: 180
+    val: 60
+    test: 60
+  split_unit: clip
+  default_t0_us: 5100000
+  num_decision_samples_per_clip: 1
+  required_features:
+    cameras:
+      - CAMERA_CROSS_LEFT_120FOV
+      - CAMERA_FRONT_WIDE_120FOV
+      - CAMERA_CROSS_RIGHT_120FOV
+      - CAMERA_FRONT_TELE_30FOV
+    labels:
+      - EGOMOTION
+  optional_features:
+    labels:
+      - object_labels
+      - traffic_controls
+      - scene_tags
+
+storage:
+  max_additional_gb_before_stop: 50
+  allow_download_by_default: false
+  clean_unused_modalities_requires_explicit_flag: true
+
+outputs:
+  manifest_jsonl: data/manifests/manifest_300clips.jsonl
+  split_summary_json: data/manifests/split_summary.json
+  storage_report_json: data/manifests/storage_report.json
+

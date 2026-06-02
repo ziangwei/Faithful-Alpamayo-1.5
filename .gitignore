@@ -214,3 +214,23 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project data, models, and experiment artifacts
+data/
+outputs/
+checkpoints/
+models/
+wandb/
+mlruns/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.npz
+*.npy
+*.mp4
+*.mov
+*.avi
+*.parquet
+!notebooks/clip_ids.parquet
