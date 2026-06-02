@@ -57,3 +57,12 @@ source scripts/server_env.sh
 
 `scripts/server_env.sh` sets model downloads to `./models` and dataset/cache
 paths to `./data`. It does not put checkpoints or adapters under `data`.
+
+For fragile interactive sessions, pre-download model files before running
+inference:
+
+```bash
+bash scripts/download_model_slow.sh
+```
+
+This uses the same model cache path but lowers Hugging Face Xet concurrency.
