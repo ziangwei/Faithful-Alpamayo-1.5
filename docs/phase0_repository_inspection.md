@@ -99,7 +99,9 @@ features. This can stream from Hugging Face and must only be used on the server.
 In this fork, the loader also honors `PHYSICAL_AI_AV_CACHE_DIR` and
 `PHYSICAL_AI_AV_LOCAL_DIR` when it creates the dataset interface, so server-side
 dataset cache and downloaded clip chunks can live under the gitignored project
-`data/` directory.
+`data/` directory. Model downloads are configured separately under `models/`;
+checkpoints, adapters, logs, and outputs each have their own top-level ignored
+directories.
 
 Default camera features:
 

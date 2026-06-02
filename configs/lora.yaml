@@ -31,7 +31,7 @@ data:
   correction_jsonl: data/annotations/coc_corrections.jsonl
 
 outputs:
-  adapter_dir: outputs/lora/adapters
-  train_log_jsonl: outputs/lora/train_log.jsonl
-  best_config_yaml: outputs/lora/best_config.yaml
-
+  adapter_dir: adapters/lora
+  checkpoint_dir: checkpoints/lora
+  train_log_jsonl: logs/lora/train_log.jsonl
+  best_config_yaml: adapters/lora/best_config.yaml
