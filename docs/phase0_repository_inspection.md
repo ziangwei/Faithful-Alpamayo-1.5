@@ -96,6 +96,10 @@ data = load_physical_aiavdataset(clip_id, t0_us=5_100_000)
 The loader creates or accepts a `physical_ai_av.PhysicalAIAVDatasetInterface`
 and calls `get_clip_feature(..., maybe_stream=True)` for egomotion and camera
 features. This can stream from Hugging Face and must only be used on the server.
+In this fork, the loader also honors `PHYSICAL_AI_AV_CACHE_DIR` and
+`PHYSICAL_AI_AV_LOCAL_DIR` when it creates the dataset interface, so server-side
+dataset cache and downloaded clip chunks can live under the gitignored project
+`data/` directory.
 
 Default camera features:
 
@@ -262,4 +266,3 @@ The first code layer should be non-invasive wrappers and config-driven scripts:
   before importing `physical_ai_av` or loading the model.
 - Metrics that consume compact JSONL/NPZ outputs and can be tested locally with
   synthetic arrays.
-

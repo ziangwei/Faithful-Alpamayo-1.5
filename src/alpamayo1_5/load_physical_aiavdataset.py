@@ -15,6 +15,8 @@
 
 """Load data from physical_ai_av.PhysicalAIAVDatasetInterface for model inference."""
 
+import os
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -68,7 +70,14 @@ def load_physical_aiavdataset(
             - clip_id: The clip ID
     """
     if avdi is None:
-        avdi = physical_ai_av.PhysicalAIAVDatasetInterface()
+        avdi_kwargs: dict[str, str] = {}
+        cache_dir = os.environ.get("PHYSICAL_AI_AV_CACHE_DIR")
+        local_dir = os.environ.get("PHYSICAL_AI_AV_LOCAL_DIR")
+        if cache_dir:
+            avdi_kwargs["cache_dir"] = str(Path(cache_dir).expanduser())
+        if local_dir:
+            avdi_kwargs["local_dir"] = str(Path(local_dir).expanduser())
+        avdi = physical_ai_av.PhysicalAIAVDatasetInterface(**avdi_kwargs)
 
     if camera_features is None:
         camera_features = [
