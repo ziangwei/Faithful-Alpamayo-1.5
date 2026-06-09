@@ -29,6 +29,7 @@ from faithful_vla.baseline import (
     select_manifest_records,
     text_extra_value,
 )
+from faithful_vla.run_paths import baseline_output_paths
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +40,11 @@ def parse_args() -> argparse.Namespace:
         default=Path("data/manifests/manifest_300clips.jsonl"),
     )
     parser.add_argument("--split", choices=("train", "val", "test"), default="val")
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Write default outputs under outputs/runs/<run-name>/baseline/.",
+    )
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
         "--execute",
@@ -64,15 +70,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--trajectories-npz", type=Path, default=None)
     parser.add_argument("--runtime-jsonl", type=Path, default=None)
     return parser.parse_args()
-
-
-def default_output_paths(split: str) -> tuple[Path, Path, Path]:
-    output_dir = Path("outputs/baseline")
-    return (
-        output_dir / f"{split}_predictions.jsonl",
-        output_dir / f"{split}_trajectories.npz",
-        output_dir / f"{split}_runtime.jsonl",
-    )
 
 
 def write_jsonl_row(stream: Any, row: dict[str, Any]) -> None:
@@ -296,12 +293,10 @@ def run_execute(
 
 def main() -> int:
     args = parse_args()
-    output_jsonl_default, trajectories_npz_default, runtime_jsonl_default = default_output_paths(
-        args.split
-    )
-    output_jsonl = args.output_jsonl or output_jsonl_default
-    trajectories_npz = args.trajectories_npz or trajectories_npz_default
-    runtime_jsonl = args.runtime_jsonl or runtime_jsonl_default
+    default_paths = baseline_output_paths(split=args.split, run_name=args.run_name)
+    output_jsonl = args.output_jsonl or default_paths["predictions"]
+    trajectories_npz = args.trajectories_npz or default_paths["trajectories"]
+    runtime_jsonl = args.runtime_jsonl or default_paths["runtime"]
 
     records = load_manifest_records(args.manifest)
     selected_records = select_manifest_records(records, split=args.split, limit=args.limit)
@@ -310,6 +305,7 @@ def main() -> int:
 
     summary = build_dry_run_summary(selected_records, split=args.split, execute=args.execute)
     summary["manifest"] = str(args.manifest)
+    summary["run_name"] = args.run_name
     summary["output_jsonl"] = str(output_jsonl)
     summary["trajectories_npz"] = str(trajectories_npz)
     summary["runtime_jsonl"] = str(runtime_jsonl)

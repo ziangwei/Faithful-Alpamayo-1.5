@@ -21,32 +21,39 @@ from faithful_vla.metrics import (
     parse_intents,
     summarize_metric_rows,
 )
+from faithful_vla.run_paths import metrics_output_paths
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--split", choices=("train", "val", "test"), default="val")
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Read/write default files under outputs/runs/<run-name>/.",
+    )
     parser.add_argument(
         "--predictions",
         type=Path,
-        default=Path("outputs/baseline/val_predictions.jsonl"),
+        default=None,
     )
     parser.add_argument(
         "--trajectories",
         type=Path,
-        default=Path("outputs/baseline/val_trajectories.npz"),
+        default=None,
     )
     parser.add_argument("--config", type=Path, default=Path("configs/metrics.yaml"))
     parser.add_argument("--time-step", type=float, default=None)
-    parser.add_argument("--summary-json", type=Path, default=Path("outputs/metrics/summary.json"))
+    parser.add_argument("--summary-json", type=Path, default=None)
     parser.add_argument(
         "--per-sample-jsonl",
         type=Path,
-        default=Path("outputs/metrics/per_sample_metrics.jsonl"),
+        default=None,
     )
     parser.add_argument(
         "--inconsistency-jsonl",
         type=Path,
-        default=Path("outputs/metrics/inconsistency_examples.jsonl"),
+        default=None,
     )
     return parser.parse_args()
 
@@ -152,13 +159,20 @@ def main() -> int:
     args = parse_args()
     import numpy as np
 
+    default_paths = metrics_output_paths(split=args.split, run_name=args.run_name)
+    predictions_path = args.predictions or default_paths["predictions"]
+    trajectories_path = args.trajectories or default_paths["trajectories"]
+    summary_json = args.summary_json or default_paths["summary"]
+    per_sample_jsonl = args.per_sample_jsonl or default_paths["per_sample"]
+    inconsistency_jsonl = args.inconsistency_jsonl or default_paths["inconsistency"]
+
     config = load_metrics_config(args.config)
     thresholds = resolve_thresholds(config)
     intent_keywords = resolve_intent_keywords(config)
     time_step = resolve_time_step(args, config)
 
-    predictions = read_jsonl(args.predictions)
-    trajectories = np.load(args.trajectories)
+    predictions = read_jsonl(predictions_path)
+    trajectories = np.load(trajectories_path)
 
     metric_rows: list[dict[str, Any]] = []
     missing_keys: list[dict[str, str]] = []
@@ -189,11 +203,13 @@ def main() -> int:
     summary = summarize_metric_rows(metric_rows)
     summary.update(
         {
-            "predictions_jsonl": str(args.predictions),
-            "trajectories_npz": str(args.trajectories),
-            "per_sample_jsonl": str(args.per_sample_jsonl),
-            "inconsistency_examples_jsonl": str(args.inconsistency_jsonl),
+            "predictions_jsonl": str(predictions_path),
+            "trajectories_npz": str(trajectories_path),
+            "per_sample_jsonl": str(per_sample_jsonl),
+            "inconsistency_examples_jsonl": str(inconsistency_jsonl),
             "config": str(args.config),
+            "run_name": args.run_name,
+            "split": args.split,
             "time_step": time_step,
             "num_prediction_rows": len(predictions),
             "num_missing_trajectory_rows": len(missing_keys),
@@ -203,14 +219,14 @@ def main() -> int:
     )
 
     inconsistent_rows = [row for row in metric_rows if not row["is_consistent"]]
-    write_json(args.summary_json, summary)
-    write_jsonl(args.per_sample_jsonl, metric_rows)
-    write_jsonl(args.inconsistency_jsonl, inconsistent_rows)
+    write_json(summary_json, summary)
+    write_jsonl(per_sample_jsonl, metric_rows)
+    write_jsonl(inconsistency_jsonl, inconsistent_rows)
 
     print(json.dumps(summary, indent=2, sort_keys=True))
-    print(f"Wrote summary: {args.summary_json}")
-    print(f"Wrote per-sample metrics: {args.per_sample_jsonl}")
-    print(f"Wrote inconsistency examples: {args.inconsistency_jsonl}")
+    print(f"Wrote summary: {summary_json}")
+    print(f"Wrote per-sample metrics: {per_sample_jsonl}")
+    print(f"Wrote inconsistency examples: {inconsistency_jsonl}")
     return 1 if missing_keys else 0
 
 
