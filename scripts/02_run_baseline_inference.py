@@ -1,0 +1,330 @@
+#!/usr/bin/env python
+"""Run Alpamayo 1.5 baseline inference over manifest records.
+
+The script is safe by default: without ``--execute`` it only prints the selected
+records and output paths. Model and dataset packages are imported only inside
+the execute path.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from faithful_vla.baseline import (
+    build_dry_run_summary,
+    build_prediction_row,
+    load_manifest_records,
+    make_sample_id,
+    select_manifest_records,
+    text_extra_value,
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path("data/manifests/manifest_300clips.jsonl"),
+    )
+    parser.add_argument("--split", choices=("train", "val", "test"), default="val")
+    parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually load model/data and run inference.",
+    )
+    parser.add_argument("--continue-on-error", action="store_true")
+
+    parser.add_argument("--model-id", default="nvidia/Alpamayo-1.5-10B")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument("--attn-implementation", default="sdpa")
+
+    parser.add_argument("--top-p", type=float, default=0.98)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--temperature", type=float, default=0.6)
+    parser.add_argument("--num-traj-samples", type=int, default=1)
+    parser.add_argument("--num-traj-sets", type=int, default=1)
+    parser.add_argument("--max-generation-length", type=int, default=256)
+    parser.add_argument("--num-frames-per-camera", type=int, default=4)
+
+    parser.add_argument("--output-jsonl", type=Path, default=None)
+    parser.add_argument("--trajectories-npz", type=Path, default=None)
+    parser.add_argument("--runtime-jsonl", type=Path, default=None)
+    return parser.parse_args()
+
+
+def default_output_paths(split: str) -> tuple[Path, Path, Path]:
+    output_dir = Path("outputs/baseline")
+    return (
+        output_dir / f"{split}_predictions.jsonl",
+        output_dir / f"{split}_trajectories.npz",
+        output_dir / f"{split}_runtime.jsonl",
+    )
+
+
+def write_jsonl_row(stream: Any, row: dict[str, Any]) -> None:
+    stream.write(json.dumps(row, sort_keys=True) + "\n")
+    stream.flush()
+
+
+def torch_dtype(torch_module: Any, dtype_name: str) -> Any:
+    if dtype_name == "bfloat16":
+        return torch_module.bfloat16
+    if dtype_name == "float16":
+        return torch_module.float16
+    return torch_module.float32
+
+
+def build_avdi() -> Any:
+    import physical_ai_av
+
+    avdi_kwargs: dict[str, str] = {}
+    cache_dir = os.environ.get("PHYSICAL_AI_AV_CACHE_DIR")
+    local_dir = os.environ.get("PHYSICAL_AI_AV_LOCAL_DIR")
+    if cache_dir:
+        avdi_kwargs["cache_dir"] = str(Path(cache_dir).expanduser())
+    if local_dir:
+        avdi_kwargs["local_dir"] = str(Path(local_dir).expanduser())
+    return physical_ai_av.PhysicalAIAVDatasetInterface(**avdi_kwargs)
+
+
+def resolve_camera_features(avdi: Any, record: dict[str, Any]) -> list[Any] | None:
+    names = record.get("required_cameras") or []
+    if not names:
+        return None
+    return [getattr(avdi.features.CAMERA, name) for name in names]
+
+
+def load_model(args: argparse.Namespace, torch: Any) -> tuple[Any, Any]:
+    from alpamayo1_5 import helper
+    from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
+
+    dtype = torch_dtype(torch, args.dtype)
+    model = Alpamayo1_5.from_pretrained(
+        args.model_id,
+        dtype=dtype,
+        attn_implementation=args.attn_implementation,
+    ).to(args.device)
+    model.eval()
+    processor = helper.get_processor(model.tokenizer)
+    return model, processor
+
+
+def run_one_record(
+    record: dict[str, Any],
+    sample_index: int,
+    args: argparse.Namespace,
+    avdi: Any,
+    model: Any,
+    processor: Any,
+    torch: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    from alpamayo1_5 import helper
+    from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
+
+    if args.device.startswith("cuda"):
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+    started_at = time.perf_counter()
+    data = load_physical_aiavdataset(
+        record["clip_id"],
+        t0_us=record["t0_us"],
+        avdi=avdi,
+        maybe_stream=True,
+        camera_features=resolve_camera_features(avdi, record),
+        num_frames=args.num_frames_per_camera,
+    )
+    messages = helper.create_message(
+        frames=data["image_frames"].flatten(0, 1),
+        camera_indices=data["camera_indices"],
+        num_frames_per_camera=args.num_frames_per_camera,
+        nav_text=record.get("nav_text"),
+    )
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=False,
+        continue_final_message=True,
+        return_dict=True,
+        return_tensors="pt",
+    )
+    model_inputs = {
+        "tokenized_data": inputs,
+        "ego_history_xyz": data["ego_history_xyz"],
+        "ego_history_rot": data["ego_history_rot"],
+    }
+    model_inputs = helper.to_device(model_inputs, args.device)
+
+    dtype = torch_dtype(torch, args.dtype)
+    device_type = "cuda" if args.device.startswith("cuda") else args.device
+    autocast_context = (
+        torch.autocast(device_type, dtype=dtype) if args.device.startswith("cuda") else nullcontext()
+    )
+    with torch.no_grad(), autocast_context:
+        pred_xyz, pred_rot, extra = model.sample_trajectories_from_data_with_vlm_rollout(
+            data=model_inputs,
+            top_p=args.top_p,
+            top_k=args.top_k,
+            temperature=args.temperature,
+            num_traj_samples=args.num_traj_samples,
+            num_traj_sets=args.num_traj_sets,
+            max_generation_length=args.max_generation_length,
+            return_extra=True,
+        )
+
+    runtime_sec = time.perf_counter() - started_at
+    max_cuda_memory_gb = None
+    if args.device.startswith("cuda"):
+        max_cuda_memory_gb = torch.cuda.max_memory_allocated() / 1024**3
+
+    arrays: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    sample_id = make_sample_id(record, sample_index)
+    arrays[f"{sample_id}__gt_xyz"] = data["ego_future_xyz"].cpu().float().numpy()[0, 0]
+    arrays[f"{sample_id}__gt_rot"] = data["ego_future_rot"].cpu().float().numpy()[0, 0]
+
+    pred_xyz_np = pred_xyz.detach().cpu().float().numpy()
+    pred_rot_np = pred_rot.detach().cpu().float().numpy()
+    for set_index in range(args.num_traj_sets):
+        for traj_index in range(args.num_traj_samples):
+            trajectory_sample_id = set_index * args.num_traj_samples + traj_index
+            row = build_prediction_row(
+                record=record,
+                sample_index=sample_index,
+                trajectory_sample_id=trajectory_sample_id,
+                cot=text_extra_value(extra, "cot", set_index, traj_index),
+                meta_action=text_extra_value(extra, "meta_action", set_index, traj_index),
+                answer=text_extra_value(extra, "answer", set_index, traj_index),
+                runtime_sec=runtime_sec,
+                max_cuda_memory_gb=max_cuda_memory_gb,
+            )
+            trajectory_key = row["trajectory_npz_key"]
+            row["trajectory_set_index"] = set_index
+            row["trajectory_index"] = traj_index
+            row["pred_xyz_npz_key"] = f"{trajectory_key}__pred_xyz"
+            row["pred_rot_npz_key"] = f"{trajectory_key}__pred_rot"
+            row["gt_xyz_npz_key"] = f"{sample_id}__gt_xyz"
+            row["gt_rot_npz_key"] = f"{sample_id}__gt_rot"
+            arrays[row["pred_xyz_npz_key"]] = pred_xyz_np[0, set_index, traj_index]
+            arrays[row["pred_rot_npz_key"]] = pred_rot_np[0, set_index, traj_index]
+            rows.append(row)
+
+    runtime_row = {
+        "clip_id": record["clip_id"],
+        "sample_id": sample_id,
+        "split": record["split"],
+        "t0_us": record["t0_us"],
+        "status": "ok",
+        "runtime_sec": runtime_sec,
+        "max_cuda_memory_gb": max_cuda_memory_gb,
+    }
+    return rows, arrays, runtime_row
+
+
+def run_execute(
+    selected_records: list[dict[str, Any]],
+    args: argparse.Namespace,
+    output_jsonl: Path,
+    trajectories_npz: Path,
+    runtime_jsonl: Path,
+) -> None:
+    import numpy as np
+    import torch
+
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    trajectories_npz.parent.mkdir(parents=True, exist_ok=True)
+    runtime_jsonl.parent.mkdir(parents=True, exist_ok=True)
+
+    avdi = build_avdi()
+    model, processor = load_model(args, torch)
+    all_arrays: dict[str, Any] = {}
+
+    with output_jsonl.open("w", encoding="utf-8") as predictions_stream, runtime_jsonl.open(
+        "w", encoding="utf-8"
+    ) as runtime_stream:
+        for sample_index, record in enumerate(selected_records):
+            try:
+                rows, arrays, runtime_row = run_one_record(
+                    record=record,
+                    sample_index=sample_index,
+                    args=args,
+                    avdi=avdi,
+                    model=model,
+                    processor=processor,
+                    torch=torch,
+                )
+            except Exception as exc:
+                runtime_row = {
+                    "clip_id": record["clip_id"],
+                    "sample_id": make_sample_id(record, sample_index),
+                    "split": record["split"],
+                    "t0_us": record["t0_us"],
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+                write_jsonl_row(runtime_stream, runtime_row)
+                if not args.continue_on_error:
+                    raise
+                continue
+
+            for row in rows:
+                write_jsonl_row(predictions_stream, row)
+            write_jsonl_row(runtime_stream, runtime_row)
+            all_arrays.update(arrays)
+            print(
+                f"[{sample_index + 1}/{len(selected_records)}] "
+                f"{record['clip_id']} runtime={runtime_row['runtime_sec']:.2f}s"
+            )
+
+    np.savez_compressed(trajectories_npz, **all_arrays)
+
+
+def main() -> int:
+    args = parse_args()
+    output_jsonl_default, trajectories_npz_default, runtime_jsonl_default = default_output_paths(
+        args.split
+    )
+    output_jsonl = args.output_jsonl or output_jsonl_default
+    trajectories_npz = args.trajectories_npz or trajectories_npz_default
+    runtime_jsonl = args.runtime_jsonl or runtime_jsonl_default
+
+    records = load_manifest_records(args.manifest)
+    selected_records = select_manifest_records(records, split=args.split, limit=args.limit)
+    if not selected_records:
+        raise SystemExit(f"No records selected for split={args.split!r}")
+
+    summary = build_dry_run_summary(selected_records, split=args.split, execute=args.execute)
+    summary["manifest"] = str(args.manifest)
+    summary["output_jsonl"] = str(output_jsonl)
+    summary["trajectories_npz"] = str(trajectories_npz)
+    summary["runtime_jsonl"] = str(runtime_jsonl)
+    print(json.dumps(summary, indent=2, sort_keys=True))
+
+    if not args.execute:
+        print("Dry run only. Re-run with --execute to load Alpamayo and PhysicalAI-AV.")
+        return 0
+
+    run_execute(selected_records, args, output_jsonl, trajectories_npz, runtime_jsonl)
+    print(f"Wrote predictions: {output_jsonl}")
+    print(f"Wrote trajectories: {trajectories_npz}")
+    print(f"Wrote runtime: {runtime_jsonl}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

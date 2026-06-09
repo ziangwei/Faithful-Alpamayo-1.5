@@ -1,0 +1,4 @@
+{"clip_id": "train-1", "split": "train", "t0_us": 1}
+{"clip_id": "val-1", "split": "val", "t0_us": 2}
+{"clip_id": "test-1", "split": "test", "t0_us": 3}
+{"clip_id": "val-2", "split": "val", "t0_us": 4}
