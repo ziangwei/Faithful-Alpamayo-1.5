@@ -28,8 +28,21 @@ class BaselineManifestTests(unittest.TestCase):
         self.assertEqual(summary["split"], "val")
         self.assertEqual(summary["selected_records"], 2)
         self.assertFalse(summary["execute"])
-        self.assertFalse(summary["model_load_performed"])
-        self.assertFalse(summary["dataset_load_performed"])
+        self.assertFalse(summary["model_load_planned"])
+        self.assertFalse(summary["dataset_load_planned"])
+
+    def test_execute_summary_reports_planned_model_and_dataset_loads(self):
+        records = [
+            {"clip_id": "val-1", "split": "val", "t0_us": 5100000},
+        ]
+
+        summary = build_dry_run_summary(records, split="val", execute=True)
+
+        self.assertTrue(summary["execute"])
+        self.assertTrue(summary["model_load_planned"])
+        self.assertTrue(summary["dataset_load_planned"])
+        self.assertNotIn("model_load_performed", summary)
+        self.assertNotIn("dataset_load_performed", summary)
 
     def test_prediction_row_has_stable_metadata_and_npz_keys(self):
         record = {

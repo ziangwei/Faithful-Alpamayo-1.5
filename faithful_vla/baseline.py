@@ -68,13 +68,13 @@ def build_dry_run_summary(
     split: str,
     execute: bool,
 ) -> dict[str, Any]:
-    """Build a dry-run summary that is explicit about side effects."""
+    """Build a pre-run summary that is explicit about planned side effects."""
     return {
         "split": split,
         "selected_records": len(records),
         "execute": execute,
-        "model_load_performed": False,
-        "dataset_load_performed": False,
+        "model_load_planned": execute,
+        "dataset_load_planned": execute,
         "download_performed_by_script": False,
         "preview_clip_ids": [record["clip_id"] for record in records[:5]],
     }
