@@ -34,6 +34,19 @@ def metrics_output_paths(split: str = "val", run_name: str | None = None) -> dic
     }
 
 
+def analysis_output_paths(run_name: str | None = None) -> dict[str, Path]:
+    """Return failure-analysis output paths for an optional run name."""
+    if run_name:
+        output_dir = Path("outputs/runs") / _clean_run_name(run_name) / "analysis"
+    else:
+        output_dir = Path("outputs/analysis")
+    return {
+        "failure_summary": output_dir / "failure_summary.json",
+        "top_failures": output_dir / "top_failures.jsonl",
+        "case_report": output_dir / "case_report.md",
+    }
+
+
 def _clean_run_name(run_name: str) -> str:
     cleaned = run_name.strip()
     if not cleaned:
