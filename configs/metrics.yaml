@@ -15,7 +15,7 @@ intent_parser:
   intents:
     stop:
       - stop
-      - stopped
+      - come to a stop
       - full stop
     slow_down:
       - slow down

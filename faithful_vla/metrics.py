@@ -8,12 +8,13 @@ dependencies.
 from __future__ import annotations
 
 import math
+import re
 from collections import Counter
 from typing import Any, Iterable, Sequence
 
 
 DEFAULT_INTENT_KEYWORDS: dict[str, list[str]] = {
-    "stop": ["stop", "stopped", "full stop"],
+    "stop": ["stop", "come to a stop", "full stop"],
     "slow_down": ["slow down", "slowing", "brake", "decelerate"],
     "yield": ["yield", "give way"],
     "avoid": ["avoid", "steer around", "obstacle"],
@@ -23,6 +24,21 @@ DEFAULT_INTENT_KEYWORDS: dict[str, list[str]] = {
     "turn_right": ["turn right", "right turn"],
     "go_straight": ["go straight", "proceed", "continue straight"],
 }
+
+ACTIVE_STOP_PATTERNS = (
+    re.compile(
+        r"(?:^|[.!?]\s*)"
+        r"(?:stop|prepare to stop|come to (?:a )?(?:full |complete )?stop|"
+        r"brake to (?:a )?stop|slow to (?:a )?stop)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:we|our vehicle|ego|ego vehicle|the ego vehicle|the vehicle)\s+"
+        r"(?:should|must|need to|needs to|has to|will)\s+"
+        r"(?:come to (?:a )?)?(?:full |complete )?stop\b",
+        re.IGNORECASE,
+    ),
+)
 
 DEFAULT_CONSISTENCY_THRESHOLDS: dict[str, float] = {
     "stop_final_speed_mps_max": 0.5,
@@ -90,7 +106,7 @@ def parse_intents(
     text = " ".join(value or "" for value in fields.values()).lower()
     intents: list[str] = []
     for intent, keywords in intent_keywords.items():
-        if any(keyword in text for keyword in keywords):
+        if _matches_intent(intent, keywords, text):
             intents.append(intent)
     return intents
 
@@ -181,6 +197,12 @@ def summarize_metric_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _xy_points(points: Sequence[Sequence[float]]) -> list[tuple[float, float]]:
     return [(float(point[0]), float(point[1])) for point in points]
+
+
+def _matches_intent(intent: str, keywords: list[str], text: str) -> bool:
+    if intent == "stop":
+        return any(pattern.search(text) for pattern in ACTIVE_STOP_PATTERNS)
+    return any(keyword.lower() in text for keyword in keywords)
 
 
 def _distance(a: tuple[float, float], b: tuple[float, float]) -> float:

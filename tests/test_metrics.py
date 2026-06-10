@@ -41,6 +41,50 @@ class MetricsTests(unittest.TestCase):
 
         self.assertEqual(intents, ["slow_down", "yield"])
 
+    def test_does_not_parse_stopped_truck_as_ego_stop_intent(self):
+        intents = parse_intents(
+            {
+                "cot": "Nudge left due to the stopped truck blocking the right side of our lane.",
+                "meta_action": "",
+            }
+        )
+
+        self.assertNotIn("stop", intents)
+
+    def test_does_not_parse_lead_vehicle_approaching_stop_as_ego_stop(self):
+        intents = parse_intents(
+            {
+                "cot": (
+                    "Slow down because the lead car is decelerating and the gap is closing "
+                    "ahead, requiring a safe following distance as it approaches a stop."
+                ),
+                "meta_action": "",
+            }
+        )
+
+        self.assertEqual(intents, ["slow_down"])
+
+    def test_does_not_parse_stopped_vehicle_as_ego_stop_intent(self):
+        intents = parse_intents(
+            {
+                "cot": "Nudge to the left to clear the stopped vehicle blocking the lane ahead.",
+                "meta_action": "",
+            }
+        )
+
+        self.assertNotIn("stop", intents)
+
+    def test_parses_active_stop_phrases(self):
+        examples = [
+            "Stop for the red traffic light.",
+            "We need to stop for the pedestrian.",
+            "The ego vehicle should come to a full stop.",
+        ]
+
+        for text in examples:
+            with self.subTest(text=text):
+                self.assertIn("stop", parse_intents({"cot": text, "meta_action": ""}))
+
     def test_flags_stop_reasoning_when_trajectory_keeps_moving(self):
         behavior = {
             "final_speed_mps": 2.0,
