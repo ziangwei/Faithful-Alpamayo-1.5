@@ -1,5 +1,9 @@
 # Implementation Plan
 
+Status: superseded for the main project direction. See
+`docs/technical_route_reassessment_zh.md`. The LoRA/RL-heavy route below is kept
+as historical context only, not as the recommended next step.
+
 This plan adapts the original project prompt to the actual local workflow:
 local code changes only, server execution only.
 
@@ -135,4 +139,3 @@ Use small commits:
 3. `feat: add dry-run subset manifest builder`
 4. `feat: add baseline inference wrapper`
 5. `feat: add consistency metrics`
-
