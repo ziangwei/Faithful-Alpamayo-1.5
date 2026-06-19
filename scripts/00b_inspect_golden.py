@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clip-id-column", default=None, help="Override clip-id column instead of auto-detecting.")
     parser.add_argument("--select", type=int, default=None, help="If set, propose this many clip ids. Omit to inspect only.")
     parser.add_argument("--stratify-by", default=None, help="Categorical column to sample proportionally across (implies stratified).")
+    parser.add_argument("--auto-stratify", action="store_true", help="Auto-pick a scene/behavior column for balanced coverage when --stratify-by is not given.")
     parser.add_argument("--seed", type=int, default=42, help="Seed for deterministic sampling.")
     parser.add_argument("--max-preview-rows", type=int, default=3, help="Sample rows to print.")
     parser.add_argument("--max-value-counts", type=int, default=20, help="Top values to print per low-cardinality column.")
@@ -162,13 +163,23 @@ def find_parquet(args: argparse.Namespace) -> Path:
 
     if args.allow_download:
         try:
-            from huggingface_hub import hf_hub_download
+            from huggingface_hub import hf_hub_download, list_repo_files
         except ImportError as exc:  # pragma: no cover
             raise SystemExit("huggingface_hub is required for --allow-download.") from exc
-        print(f"[info] downloading {args.filename} from {args.repo_id} (one small file) ...")
+        target = args.filename
+        try:
+            files = list_repo_files(args.repo_id, repo_type="dataset")
+            matches = [f for f in files if f == args.filename or f.endswith("/" + args.filename)]
+            if not matches:
+                matches = [f for f in files if "golden" in f.lower() and f.endswith(".parquet")]
+            if matches:
+                target = sorted(matches, key=len)[0]
+        except Exception as exc:  # pragma: no cover - network/auth dependent
+            print(f"[warn] could not list repo files ({exc}); trying '{target}' as-is.")
+        print(f"[info] downloading '{target}' from {args.repo_id} (small index file) ...")
         downloaded = hf_hub_download(
             repo_id=args.repo_id,
-            filename=args.filename,
+            filename=target,
             repo_type="dataset",
             cache_dir=str(args.cache_dir) if args.cache_dir else None,
         )
@@ -211,6 +222,27 @@ def low_cardinality_columns(df: Any, clip_col: str, max_card: int) -> list[tuple
         if 1 <= nunique <= max_card:
             out.append((name, nunique))
     return out
+
+
+SCENE_BEHAVIOR_HINTS = [
+    "scene", "scenario", "category", "type", "class", "behavior", "maneuver",
+    "action", "intent", "weather", "tag", "label", "condition", "difficulty",
+]
+
+
+def pick_auto_stratum(candidates: list[tuple[str, int]]) -> str | None:
+    """Pick a stratification column: low-card, prefer scene/behavior names, more strata first."""
+    usable = [(name, n) for name, n in candidates if 2 <= n <= 30]
+    if not usable:
+        return None
+    usable.sort(
+        key=lambda item: (
+            1 if any(h in item[0].lower() for h in SCENE_BEHAVIOR_HINTS) else 0,
+            item[1],
+        ),
+        reverse=True,
+    )
+    return usable[0][0]
 
 
 def truncate(value: Any, width: int = 80) -> str:
@@ -325,19 +357,26 @@ def main() -> int:
             print("[note] --write ignored without --select.")
         return 0
 
-    if args.stratify_by:
-        if args.stratify_by not in df.columns:
-            raise SystemExit(f"--stratify-by '{args.stratify_by}' not in columns: {list(df.columns)}")
-        stratum_card = int(df[args.stratify_by].nunique(dropna=True))
+    stratify_by = args.stratify_by
+    if stratify_by is None and args.auto_stratify:
+        stratify_by = pick_auto_stratum(candidates)
+        if stratify_by is None:
+            print("[auto-stratify] no suitable categorical column found; using uniform sampling.")
+        else:
+            print(f"[auto-stratify] chose '{stratify_by}' for balanced coverage across its values.")
+
+    if stratify_by:
+        if stratify_by not in df.columns:
+            raise SystemExit(f"--stratify-by '{stratify_by}' not in columns: {list(df.columns)}")
+        stratum_card = int(df[stratify_by].nunique(dropna=True))
         if stratum_card > MAX_CARDINALITY_FOR_VALUE_COUNTS and not args.force:
             raise SystemExit(
-                f"--stratify-by '{args.stratify_by}' has {stratum_card} unique values "
+                f"--stratify-by '{stratify_by}' has {stratum_card} unique values "
                 f"(> {MAX_CARDINALITY_FOR_VALUE_COUNTS}); this yields near-degenerate strata "
-                "(~1 clip per value). Pick a low-cardinality column from the inspection "
-                "output, or pass --force to override."
+                "(~1 clip per value). Pick a low-cardinality column, or pass --force."
             )
-        selected, allocation = sample_stratified(df, clip_col, args.stratify_by, args.select, args.seed)
-        method = f"stratified by '{args.stratify_by}'"
+        selected, allocation = sample_stratified(df, clip_col, stratify_by, args.select, args.seed)
+        method = f"stratified by '{stratify_by}'"
     else:
         selected = sample_uniform(df[clip_col].astype(str).tolist(), args.select, args.seed)
         allocation = None
