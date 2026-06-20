@@ -47,6 +47,7 @@
 4. `03c_oracle_gap.py` — oracle gap 分解 [CPU]
 5. `04_rerank.py` — aware/blind/consensus 选择器 + bootstrap CI [CPU]
 6. `05_case_studies.py` — win/loss 案例 + 轨迹图 [CPU]
+7. `06_learned_rerank.py` — **B**:learned reranker(ridge + 逻辑回归,leave-one-clip-out CV)+ vs-first / vs-MBR bootstrap [CPU,numpy-only,无需 GPU]
 
 一键 1–3:`run_baseline.sh`(`N=` 控制 clip 数,`RUN=` 命名,`LIMIT=` 冒烟)。最终 run:`N=1000 RUN=val_cand5_n1000`。
 
@@ -58,9 +59,14 @@
 ## 4. 已完成 / 当前位置
 
 - ✅ A 全部完成(n=1000 定稿):复现、数据、管线、oracle 诊断、consensus 显著结果、reasoning 负结果、bootstrap CI、case study、`docs/interview_summary.md`。
-- ⬜ **B = learned reranker(下一步,新会话主题)。**
+- ✅ **B 代码 + 测试完成**:`scripts/06_learned_rerank.py`(numpy-only learned reranker,LOO-CV)+ `tests/test_learned_rerank.py`(6 测试,合成数据端到端通过)。**待办:在服务器对 `val_cand5_n1000` 跑一次出真实数字 —— `python scripts/06_learned_rerank.py --run-name val_cand5_n1000`(CPU,无需 GPU)。**
 
 ## 5. B 交接 brief:learned reranker(Tier 2)
+
+> **状态(2026-06-20):已实现并通过合成数据测试,待服务器跑真实数字。**
+> `scripts/06_learned_rerank.py`(numpy-only,无 sklearn 依赖)+ `tests/test_learned_rerank.py`(6 测试通过)。
+> 运行:`python scripts/06_learned_rerank.py --run-name val_cand5_n1000` → 写 `analysis/learned_rerank_report.json` + `learned_rerank_selection.jsonl`。
+> 报告自带 `verdict_logreg_vs_mbr` / `verdict_ridge_vs_mbr` 字段:据 vs-MBR 的 95% bootstrap CI **自动判定** learned 是否真打败 MBR(CI 含 0 → "learned ≈ MBR")。
 
 **核心问题:** 一个学出来的小评分器,能不能打败**免费的 MBR/consensus**?
 
@@ -69,8 +75,8 @@
 **做法:**
 - 候选特征:`04_rerank.py::candidate_features`(末速 / speed_delta / jerk / heading / lateral)+ **到共识的距离**(已知有信号)。
 - 标签:该候选是否 ADE 最低(分类)或回归 ADE。
-- LOO-CV:每个 clip 用其余 999 训一个小模型(逻辑回归 / GBM),预测这 5 条的分,选 argmax,评 ADE。
-- 对比 first / **MBR** / oracle,带 bootstrap CI + vs-MBR 输赢(直接复用 `04` 的 `bootstrap_improvement`)。
+- LOO-CV:每个 clip 用其余 999 训一个小模型,预测这 5 条的分,选 argmax,评 ADE。**已实现两种(numpy 手写,仓库无 sklearn):ridge 回归(预测 clip 内 z-scored ADE,选 argmin)+ L2 逻辑回归(预测 is_best,选 argmax)。**
+- 对比 first / **MBR** / ridge / logreg / oracle,带 paired bootstrap CI:vs-first(同 A 的方法)**和 vs-MBR(关键对照)**,overall + stop/yield 子集,均带 per-case 输赢。
 
 **诚实预期(务必先想清楚):** 已证明廉价动力学 / intent 特征**不带选择信号**(aware 不如 blind)。所以 learned-over-cheap-features **很可能 ≈ MBR、打不过**——这本身是干净结论("MBR 已接近廉价特征选择的天花板")。**想真正打败 MBR,需要更 richer 的特征**(视觉 / 场景 embedding,或模型 hidden states),那是更大的工程。新会话开工前先决定:接受"learned≈MBR"的确认性结论,还是投入 richer 特征去搏一把。
 

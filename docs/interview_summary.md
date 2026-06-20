@@ -98,9 +98,11 @@ Four training-free selectors, none of which use GT:
 - The improvement is **selection-bounded by the oracle** (recovers ~26% of a ~51% gap);
   modest by design. Cheap post-hoc dynamics/intent features carry little selection signal —
   capturing more likely needs the model's visual context or internal state.
-- **Next (Tier 2):** a tiny **learned scorer** (train split / leave-one-clip-out CV; features
-  incl. distance-to-consensus, dynamics) to predict the best candidate, tested against free
-  MBR. Honest expectation: cheap features ≈ MBR; beating it needs richer (visual/internal)
+- **Tier 2 (implemented):** a tiny **learned scorer** — ridge on within-clip ADE + L2 logistic
+  regression on is-best, numpy-only — selected by **leave-one-clip-out CV** over the existing
+  1,000 clips (no new GPU), with distance-to-consensus + dynamics features, scored against free
+  MBR via paired bootstrap CIs (`scripts/06_learned_rerank.py`). Honest expectation, baked into
+  the report's auto-verdict: cheap features ≈ MBR; beating it needs richer (visual/internal)
   features, which could later guide the FlowMatching sampler.
 
 ## Reproduce
