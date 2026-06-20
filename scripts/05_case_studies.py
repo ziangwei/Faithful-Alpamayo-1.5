@@ -82,17 +82,30 @@ def main():
     except Exception:
         have_mpl = False
 
+    def _speed(xyz):
+        xy = np.asarray(xyz, dtype=float)[:, :2]
+        return np.linalg.norm(np.diff(xy, axis=0), axis=1) / a.time_step
+
     def plot(case, tag):
         if not have_mpl:
             return None
-        fig, ax = plt.subplots(figsize=(5, 5))
-        for label, xyz, style in [("GT", case["gt"], "k-"), ("first-sample", case["first_xyz"], "r--"),
-                                   ("consensus", case["centroid_xyz"], "g-"), ("oracle", case["oracle_xyz"], "b:")]:
-            ax.plot(xyz[:, 0], xyz[:, 1], style, label=label, linewidth=2)
-        ax.set_title(f"{tag} {case['clip_id'][:8]} | first {case['first_ade']:.2f} -> cons {case['centroid_ade']:.2f} m")
-        ax.legend(fontsize=8); ax.set_aspect("equal", "datalim"); ax.grid(alpha=0.3)
+        series = [("GT", case["gt"], "k-"), ("first-sample", case["first_xyz"], "r--"),
+                  ("consensus(MBR)", case["centroid_xyz"], "g-"), ("oracle", case["oracle_xyz"], "b:")]
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.4))
+        for label, xyz, style in series:                          # left: top-down trajectory
+            ax1.plot(xyz[:, 0], xyz[:, 1], style, label=label, linewidth=2)
+        ax1.set_title("trajectory (top-down)"); ax1.set_xlabel("x [m]"); ax1.set_ylabel("y [m]")
+        ax1.legend(fontsize=8); ax1.set_aspect("equal", "datalim"); ax1.grid(alpha=0.3)
+        for label, xyz, style in series:                          # right: speed profile
+            sp = _speed(xyz); ax2.plot(np.arange(len(sp)) * a.time_step, sp, style, label=label, linewidth=2)
+        ax2.set_title("speed profile"); ax2.set_xlabel("t [s]"); ax2.set_ylabel("speed [m/s]"); ax2.grid(alpha=0.3)
+        cot = (case["cot"] or "").replace("\n", " ").strip()
+        cot = (cot[:110] + "…") if len(cot) > 110 else cot
+        fig.suptitle(f"{tag} | {case['clip_id'][:8]} | intents: {','.join(case['intents']) or '-'} | "
+                     f"first {case['first_ade']:.2f} → MBR {case['centroid_ade']:.2f} "
+                     f"(oracle {case['oracle_ade']:.2f}) m\nCoT: {cot}", fontsize=8)
         name = f"{tag}_{case['clip_id'][:8]}.png"
-        fig.tight_layout(); fig.savefig(fig_dir / name, dpi=110); plt.close(fig)
+        fig.tight_layout(rect=[0, 0, 1, 0.9]); fig.savefig(fig_dir / name, dpi=120); plt.close(fig)
         return name
 
     lines = ["# Consensus (MBR) selection — case studies", "",

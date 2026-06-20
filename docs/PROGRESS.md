@@ -11,6 +11,8 @@
 
 **结论(n=1000 已确证)**:模型部署的 first-sample 留了 **~51% 可恢复的*选择*误差**;一个免费、无训练的 **consensus / Minimum-Bayes-Risk 选择器**显著捞回 **~26% ADE / ~26% FDE**(overall 与 stop/yield 子集**均显著**);而 **reasoning-aware 选择无效、且不如 reasoning-blind**(intent 对选轨迹无信号)。
 
+**B 结论(learned reranker,n=1000 已确证)**:放开手训练也**打不过**免费 MBR。ridge 回归(预测 ADE 选 argmin)**追平** MBR——ADE 1.634 vs 1.635,+25.8% vs +25.7%,vs-MBR CI[−0.018, 0.019] 含 0、776/1000 平局——坐实"MBR 是廉价后验特征的天花板"。把目标设成"分类最优候选"(logreg)反而**比不选还差**(−5.4%,输 MBR CI[−0.39, −0.21]):oracle-best 多是偏离共识的走运抽样,分类器学会追离群点 → 平均反噬。**回归学到"居中更安全",分类学到"追离群"——目标设定决定成败。**
+
 ## 2. 关键数据结果(官方 val,1000 clips × 5 候选,95% bootstrap CI)
 
 误差分解(oracle 仅用于分析,不用于选择):
@@ -46,8 +48,9 @@
 3. `02_run_baseline_inference.py --num-traj-samples 5` — 多候选预测+轨迹 [GPU]
 4. `03c_oracle_gap.py` — oracle gap 分解 [CPU]
 5. `04_rerank.py` — aware/blind/consensus 选择器 + bootstrap CI [CPU]
-6. `05_case_studies.py` — win/loss 案例 + 轨迹图 [CPU]
+6. `05_case_studies.py` — win/loss 案例 + 双栏图(top-down 轨迹 + 速度曲线 + CoT 注释)[CPU]
 7. `06_learned_rerank.py` — **B**:learned reranker(ridge + 逻辑回归,leave-one-clip-out CV)+ vs-first / vs-MBR bootstrap [CPU,numpy-only,无需 GPU]
+8. `07_set_rerank.py` — **C**:set-aggregator reranker(numpy DeepSets,permutation-invariant,k-fold CV)+ vs-MBR bootstrap [CPU,无需 GPU]
 
 一键 1–3:`run_baseline.sh`(`N=` 控制 clip 数,`RUN=` 命名,`LIMIT=` 冒烟)。最终 run:`N=1000 RUN=val_cand5_n1000`。
 
@@ -59,14 +62,15 @@
 ## 4. 已完成 / 当前位置
 
 - ✅ A 全部完成(n=1000 定稿):复现、数据、管线、oracle 诊断、consensus 显著结果、reasoning 负结果、bootstrap CI、case study、`docs/interview_summary.md`。
-- ✅ **B 代码 + 测试完成**:`scripts/06_learned_rerank.py`(numpy-only learned reranker,LOO-CV)+ `tests/test_learned_rerank.py`(6 测试,合成数据端到端通过)。**待办:在服务器对 `val_cand5_n1000` 跑一次出真实数字 —— `python scripts/06_learned_rerank.py --run-name val_cand5_n1000`(CPU,无需 GPU)。**
+- ✅ **B 完成(n=1000 真实数字已出)**:`scripts/06_learned_rerank.py`(numpy-only,LOO-CV)+ `tests/test_learned_rerank.py`(6 测试)。**结果:ridge 追平 MBR(+25.8%,vs-MBR CI 含 0、776/1000 平局),logreg 比不选更差(−5.4%)。结论 = learned 打不过免费 MBR,MBR 是廉价特征天花板;目标设定(回归 vs 分类)本身是干净的方法学结论。**
+- ✅ **C(set-aggregator)代码 + 测试完成**:`scripts/07_set_rerank.py`(numpy DeepSets,permutation-invariant,反向传播经**数值梯度检验**)+ `tests/test_set_rerank.py`(5 测试:梯度检验 + 行为)。攻击 MBR 的弱点(均值聚合器);合成数据上能真打败 MBR(证明工具有效)。**待办:服务器跑 `python scripts/07_set_rerank.py --run-name val_cand5_n1000`(CPU,无需 GPU);诚实预期仍 ≈ MBR(真实几何已榨干)。**
+- 📋 **Tier-3 主攻设计(未跑):** `docs/tier3_hidden_state_verifier.md` —— frozen-VLM hidden-state 上的 learned verifier(best-of-N + reward-model 范式),唯一可能真破 MBR 天花板的方向,需一次 GPU dump,不微调 10B。`05_case_studies.py` 已升级为双栏图(轨迹+速度+CoT),面试出图就绪。
 
 ## 5. B 交接 brief:learned reranker(Tier 2)
 
-> **状态(2026-06-20):已实现并通过合成数据测试,待服务器跑真实数字。**
-> `scripts/06_learned_rerank.py`(numpy-only,无 sklearn 依赖)+ `tests/test_learned_rerank.py`(6 测试通过)。
-> 运行:`python scripts/06_learned_rerank.py --run-name val_cand5_n1000` → 写 `analysis/learned_rerank_report.json` + `learned_rerank_selection.jsonl`。
-> 报告自带 `verdict_logreg_vs_mbr` / `verdict_ridge_vs_mbr` 字段:据 vs-MBR 的 95% bootstrap CI **自动判定** learned 是否真打败 MBR(CI 含 0 → "learned ≈ MBR")。
+> **状态(2026-06-20):完成,n=1000 真实数字已出。** `scripts/06_learned_rerank.py`(numpy-only,无 sklearn)+ `tests/test_learned_rerank.py`(6 测试)。运行:`python scripts/06_learned_rerank.py --run-name val_cand5_n1000`。
+> **结果(overall):ridge ADE 1.634 ≈ MBR 1.635(+25.8% vs +25.7%,vs-MBR CI[−0.018, 0.019] 含 0、776/1000 平局)→ 追平、打不过;logreg ADE 1.932 > first 1.880(−5.4%,vs-MBR CI[−0.39, −0.21] frac 0)→ 显著更差。** stop/yield 同形:ridge +27.7% ≈ MBR +27.1%,logreg +10.6% 更差。
+> 机制:回归 ADE → 学到"居中更安全"、收敛到 MBR;分类 is_best → oracle-best 多为偏离共识的走运抽样 → 学会追离群点 → 反噬。**learned 打不过免费 MBR,坐实廉价特征天花板;想真超过得上 richer(视觉/hidden-state)特征。**
 
 **核心问题:** 一个学出来的小评分器,能不能打败**免费的 MBR/consensus**?
 
