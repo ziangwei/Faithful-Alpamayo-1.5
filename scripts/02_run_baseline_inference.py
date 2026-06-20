@@ -82,6 +82,17 @@ def parse_args() -> argparse.Namespace:
         help="Dotted submodule to hook for hidden states (default: auto-detect the VLM text decoder).",
     )
     parser.add_argument("--hidden-npz", type=Path, default=None)
+
+    # v2.1: per-candidate diffusion-expert hidden state (directly discriminative, unlike the
+    # candidate-shared scene vector).
+    parser.add_argument(
+        "--dump-expert-hidden",
+        action="store_true",
+        help="Also save the diffusion expert's per-candidate hidden state (N x H per clip).",
+    )
+    parser.add_argument("--expert-module", default="expert",
+                        help="Dotted submodule for the diffusion expert (default: 'expert').")
+    parser.add_argument("--expert-npz", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -125,6 +136,35 @@ class HiddenCapture:
 
     def take(self):
         v, self._best, self._best_tokens = self._best, None, -1
+        return v
+
+
+class ExpertCapture:
+    """Hook on the diffusion expert that keeps the LAST forward's per-candidate hidden state.
+
+    The expert runs once per diffusion denoising step; the last call is ~ the final (cleanest)
+    step. Its last_hidden_state is (b*, Tf, H) with b* = the candidates; we mean-pool over the Tf
+    trajectory tokens -> (b*, H) = one vector per candidate, ordered by trajectory_sample_id. This
+    feature differs per candidate (unlike the shared scene vector), so a verifier head can use it
+    directly. (Assumes the expert batch order matches trajectory_sample_id; the runtime shape
+    print lets you confirm rows == #candidates.)
+    """
+
+    def __init__(self) -> None:
+        self._last = None
+
+    def __call__(self, module: Any, inputs: Any, output: Any) -> None:
+        h = getattr(output, "last_hidden_state", None)
+        if h is None:
+            h = output[0] if isinstance(output, (tuple, list)) else output
+        try:
+            if hasattr(h, "dim") and h.dim() == 3:
+                self._last = h.detach().float().mean(dim=1).cpu().numpy()  # (b*, H)
+        except Exception:
+            pass
+
+    def take(self):
+        v, self._last = self._last, None
         return v
 
 
@@ -173,7 +213,7 @@ def resolve_camera_features(avdi: Any, record: dict[str, Any]) -> list[Any] | No
     return [getattr(avdi.features.CAMERA, name) for name in names]
 
 
-def load_model(args: argparse.Namespace, torch: Any) -> tuple[Any, Any, Any]:
+def load_model(args: argparse.Namespace, torch: Any) -> tuple[Any, Any, Any, Any]:
     from alpamayo1_5 import helper
     from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
 
@@ -191,7 +231,13 @@ def load_model(args: argparse.Namespace, torch: Any) -> tuple[Any, Any, Any]:
         module, path = resolve_vlm_module(model, args.hidden_module)
         module.register_forward_hook(capture)
         print(f"[dump-hidden] hooked VLM submodule: {path}")
-    return model, processor, capture
+    expert_cap = None
+    if getattr(args, "dump_expert_hidden", False):
+        expert_cap = ExpertCapture()
+        module, path = resolve_vlm_module(model, args.expert_module)
+        module.register_forward_hook(expert_cap)
+        print(f"[dump-expert-hidden] hooked expert submodule: {path}")
+    return model, processor, capture, expert_cap
 
 
 def run_one_record(
@@ -203,7 +249,8 @@ def run_one_record(
     processor: Any,
     torch: Any,
     capture: Any = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], Any]:
+    expert_cap: Any = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], Any, Any]:
     from alpamayo1_5 import helper
     from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
 
@@ -305,7 +352,8 @@ def run_one_record(
         "max_cuda_memory_gb": max_cuda_memory_gb,
     }
     scene_vec = capture.take() if capture is not None else None
-    return rows, arrays, runtime_row, scene_vec
+    expert_mat = expert_cap.take() if expert_cap is not None else None
+    return rows, arrays, runtime_row, scene_vec, expert_mat
 
 
 def run_execute(
@@ -315,6 +363,7 @@ def run_execute(
     trajectories_npz: Path,
     runtime_jsonl: Path,
     hidden_npz: Path | None = None,
+    expert_npz: Path | None = None,
 ) -> None:
     import numpy as np
     import torch
@@ -324,16 +373,17 @@ def run_execute(
     runtime_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
     avdi = build_avdi()
-    model, processor, capture = load_model(args, torch)
+    model, processor, capture, expert_cap = load_model(args, torch)
     all_arrays: dict[str, Any] = {}
     hidden_arrays: dict[str, Any] = {}
+    expert_arrays: dict[str, Any] = {}
 
     with output_jsonl.open("w", encoding="utf-8") as predictions_stream, runtime_jsonl.open(
         "w", encoding="utf-8"
     ) as runtime_stream:
         for sample_index, record in enumerate(selected_records):
             try:
-                rows, arrays, runtime_row, scene_vec = run_one_record(
+                rows, arrays, runtime_row, scene_vec, expert_mat = run_one_record(
                     record=record,
                     sample_index=sample_index,
                     args=args,
@@ -342,6 +392,7 @@ def run_execute(
                     processor=processor,
                     torch=torch,
                     capture=capture,
+                    expert_cap=expert_cap,
                 )
             except Exception as exc:
                 runtime_row = {
@@ -367,6 +418,11 @@ def run_execute(
                     print(f"[dump-hidden] scene vector dim = {tuple(scene_vec.shape)} "
                           f"(should be hidden-size ~ a few thousand, NOT vocab-size)")
                 hidden_arrays[f"{make_sample_id(record, sample_index)}__scene_vec"] = scene_vec
+            if expert_mat is not None:
+                if not expert_arrays:
+                    print(f"[dump-expert-hidden] expert hidden shape = {tuple(expert_mat.shape)} "
+                          f"(rows should == #candidates per clip)")
+                expert_arrays[f"{make_sample_id(record, sample_index)}__expert_hidden"] = expert_mat
             print(
                 f"[{sample_index + 1}/{len(selected_records)}] "
                 f"{record['clip_id']} runtime={runtime_row['runtime_sec']:.2f}s"
@@ -377,6 +433,10 @@ def run_execute(
         hidden_npz.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(hidden_npz, **hidden_arrays)
         print(f"Wrote hidden scene vectors: {hidden_npz}  ({len(hidden_arrays)} clips)")
+    if getattr(args, "dump_expert_hidden", False) and expert_arrays and expert_npz is not None:
+        expert_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(expert_npz, **expert_arrays)
+        print(f"Wrote expert hidden states: {expert_npz}  ({len(expert_arrays)} clips)")
 
 
 def main() -> int:
@@ -386,6 +446,7 @@ def main() -> int:
     trajectories_npz = args.trajectories_npz or default_paths["trajectories"]
     runtime_jsonl = args.runtime_jsonl or default_paths["runtime"]
     hidden_npz = args.hidden_npz or (trajectories_npz.parent / f"{args.split}_hidden.npz")
+    expert_npz = args.expert_npz or (trajectories_npz.parent / f"{args.split}_expert.npz")
 
     records = load_manifest_records(args.manifest)
     selected_records = select_manifest_records(records, split=args.split, limit=args.limit)
@@ -400,6 +461,8 @@ def main() -> int:
     summary["runtime_jsonl"] = str(runtime_jsonl)
     if args.dump_hidden:
         summary["hidden_npz"] = str(hidden_npz)
+    if args.dump_expert_hidden:
+        summary["expert_npz"] = str(expert_npz)
     print(json.dumps(summary, indent=2, sort_keys=True))
 
     if not args.execute:
@@ -407,12 +470,15 @@ def main() -> int:
         return 0
 
     run_execute(selected_records, args, output_jsonl, trajectories_npz, runtime_jsonl,
-                hidden_npz=hidden_npz if args.dump_hidden else None)
+                hidden_npz=hidden_npz if args.dump_hidden else None,
+                expert_npz=expert_npz if args.dump_expert_hidden else None)
     print(f"Wrote predictions: {output_jsonl}")
     print(f"Wrote trajectories: {trajectories_npz}")
     print(f"Wrote runtime: {runtime_jsonl}")
     if args.dump_hidden:
         print(f"Wrote hidden scene vectors: {hidden_npz}")
+    if args.dump_expert_hidden:
+        print(f"Wrote expert hidden states: {expert_npz}")
     return 0
 
 

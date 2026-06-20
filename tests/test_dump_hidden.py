@@ -101,6 +101,20 @@ class ResolveModuleTests(unittest.TestCase):
             M2.resolve_vlm_module(types.SimpleNamespace(), None)
 
 
+class ExpertCaptureTests(unittest.TestCase):
+    def test_keeps_last_pass_and_pools_per_candidate(self):
+        cap = M2.ExpertCapture()
+        rng = np.random.default_rng(0)
+        step1 = rng.standard_normal((5, 8, 4))       # 5 candidates, 8 traj tokens, H=4
+        last = rng.standard_normal((5, 8, 4))         # the final denoising step
+        cap(None, None, types.SimpleNamespace(last_hidden_state=FakeTensor(step1)))
+        cap(None, None, types.SimpleNamespace(last_hidden_state=FakeTensor(last)))
+        v = cap.take()
+        self.assertEqual(v.shape, (5, 4))             # per-candidate (b*, H)
+        np.testing.assert_allclose(v, last.mean(axis=1), rtol=1e-6)  # last call, pooled over tokens
+        self.assertIsNone(cap.take())                 # reset
+
+
 def _nest(parts, leaf):
     node = leaf
     for part in reversed(parts):

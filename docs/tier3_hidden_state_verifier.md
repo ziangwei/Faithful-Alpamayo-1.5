@@ -1,7 +1,7 @@
 # 2.0 设计:frozen-VLM hidden-state 上的 learned verifier head
 
 日期:2026-06-20
-状态:**2.0 代码已全部就绪。** dump = `02 --dump-hidden`(forward-hook VLM text decoder,`tests/test_dump_hidden.py` 7 单测过);head = `scripts/08_train_verifier.py`(+ `tests/test_train_verifier.py`,4 测试,含数值梯度检验)。**只剩一步 GPU**:重跑一次推理 dump hidden,再训 head。不微调 10B。
+状态:**v2.0 已跑出首个结果(见 §9):候选共享的 scene 反而显著伤害。** 已加两手对策:`08 --scene-pca`(降维治过拟合)+ `02 --dump-expert-hidden`(逐候选 expert hidden,绕开 shared 限制)。测试:`test_train_verifier.py`(6)+ `test_dump_hidden.py`(8)全过。不微调 10B。
 
 ## 1. 为什么(1.0 的三重印证)
 
@@ -91,4 +91,17 @@ python scripts/08_train_verifier.py --run-name val_cand5_n1000 \
 
 > "我先用线性回归、分类、和置换不变集合网络三种学习方法证明了纯几何选择在 MBR 见顶,所以原则上的下一步是 frozen-VLM hidden-state 上的 learned verifier——就是 best-of-N + reward model 那套 test-time scaling 范式。我把它设计成一个 geom vs geom+scene 的消融,直接量化内部状态比几何多带多少选择信号,head 和评测都写好且数值梯度检验过了,只差在服务器上 dump 一次 hidden state。"
 
-不声称已跑出正结果;这是有据可依、且工具已验证的下一步。
+## 9. 首次结果(n=1000)与两手对策
+
+**结果**(`08 --scene val_hidden.npz`,scene_dim=4096):geom head **精确追平 MBR**(26.28% vs 26.35% gap closed);但 geom+scene **显著输 MBR**(−0.054m,CI[−0.099,−0.010]),且 **scene 边际显著为负**(−0.053m,CI[−0.10,−0.01],frac 0.008)→ `verdict_scene_marginal = "scene HURTS"`。
+
+**两层诊断**:
+- *表层*:4096 维 shared 特征 + ~800 训练 clip → 维度灾难,head 过拟合训练折、留出折反而更差(对照合成测试:4 维噪声 scene 边际≈0,4096 维则显著为负)。
+- *深层*:scene 对一个 clip 的 5 条候选是**同一份** → within-clip argmin 里线性头中它对所有候选同移、**直接抵消**;只能靠 geom×scene 的非线性交互起作用,而交互正是最易过拟合、最难从 1000 clip 学到的——信号被放在了最难用的位置。
+
+**对策一(便宜,CPU,复用现有 dump)**:`08 --scene-pca 24` —— 无监督(label-free,无 target 泄漏)PCA 把 4096 压到 ~24 维,大幅降过拟合。预期把"显著伤害"拉回"打平 MBR";但受 shared 限制,难真正超过。
+
+**对策二(正解,需 GPU 重 dump)**:`02 --dump-expert-hidden` —— 抽扩散 expert 的 `last_hidden_state`(形状 `(候选数, H)`,**每条候选不同**),是模型对每条候选的内部表示,线性可直接利用、绕开 shared 限制。存 `<split>_expert.npz`,`08 --scene <split>_expert.npz` 自动按"逐候选 2D 特征"处理。**这才是真正可能赢 MBR 的一手。**
+> 假设:expert 的 batch 行序 = `trajectory_sample_id`;运行时打印形状供核对(行数应 == 每 clip 候选数;不对就用 `--expert-module` 调整)。
+
+不声称已跑出正结果。当前诚实状态:naive 共享 hidden 会过拟合伤害(已诊断清楚),两手对策(降维 / 逐候选)代码与测试就绪,等服务器各跑一次见分晓。

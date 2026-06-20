@@ -193,7 +193,12 @@ def build_clip_table(preds, traj, scene, time_step, k_waypoints):
         Xg = np.array([list(dyn[i]) + list(waypoints(cands[i]["xyz"], k_waypoints)) + [dist_z[i]]
                        for i in range(len(cands))], dtype=float)
         sc = scene.get(sid) if scene is not None else None
-        scene_row = np.asarray(sc, dtype=float) if sc is not None else None
+        scene_row = None
+        if sc is not None:
+            sc = np.asarray(sc, dtype=float)
+            # accept a shared per-clip vector (1-D) or per-candidate features (2-D: N x H)
+            if sc.ndim == 1 or (sc.ndim == 2 and sc.shape[0] == len(cands)):
+                scene_row = sc
         ade = np.array([c["ade"] for c in cands]); fde = np.array([c["fde"] for c in cands])
         oracle_idx = int(np.argmin(ade))
         intents = sorted(set(parse_intents(
@@ -213,12 +218,26 @@ def _design(clips, use_scene):
     for k, c in enumerate(clips):
         Xg = c["Xg"]
         if use_scene:
-            sc = np.broadcast_to(c["scene"], (Xg.shape[0], c["scene"].shape[0]))
-            X = np.concatenate([Xg, sc], axis=1)
+            sc = c["scene"]
+            S = sc if sc.ndim == 2 else np.broadcast_to(sc, (Xg.shape[0], sc.shape[0]))
+            X = np.concatenate([Xg, S], axis=1)
         else:
             X = Xg
         rows.append(X); tgt.append(c["tgt"]); clip_ix.append(np.full(len(c["ade"]), k))
     return np.vstack(rows), np.concatenate(tgt), np.concatenate(clip_ix)
+
+
+def apply_scene_pca(clips, k):
+    """Unsupervised (label-free) PCA to shrink the scene features to k dims -- the fix for
+    overfitting when the raw hidden state is huge (e.g. 4096-d) and clips are few. Fit once
+    on all clips' scene rows; uses no labels, so there is no target leakage."""
+    mats = [c["scene"][None, :] if c["scene"].ndim == 1 else c["scene"] for c in clips]
+    X = np.vstack(mats)
+    mu = X.mean(axis=0)
+    comps = np.linalg.svd(X - mu, full_matrices=False)[2][:k]      # (k, D)
+    for c in clips:
+        c["scene"] = (c["scene"] - mu) @ comps.T
+    return int(X.shape[1]), int(comps.shape[0])
 
 
 def run_head(clips, use_scene, *, hidden, steps, lr, l2, kfolds, seed):
@@ -292,11 +311,20 @@ def verdict(sig, label_better, label_worse, label_tie):
 
 
 def build_report(preds, traj, scene, *, time_step=0.1, k_waypoints=6, hidden=32, steps=400,
-                 lr=0.01, l2=1e-3, kfolds=5, n_boot=2000, seed=42, run_name=None, split="val"):
+                 lr=0.01, l2=1e-3, kfolds=5, n_boot=2000, seed=42, scene_pca=0,
+                 run_name=None, split="val"):
     clips, have_scene = build_clip_table(preds, traj, scene, time_step, k_waypoints)
     if not clips:
         return {"num_clips": 0, "note": "no usable clips"}, []
     _base(clips)
+    scene_info = {"present": have_scene}
+    if have_scene:
+        scene_info["per_candidate"] = bool(clips[0]["scene"].ndim == 2)
+        scene_info["dim"] = int(clips[0]["scene"].shape[-1])
+        if scene_pca and scene_pca > 0 and scene_info["dim"] > scene_pca:
+            orig, red = apply_scene_pca(clips, scene_pca)
+            scene_info["pca"] = {"from": orig, "to": red}
+            scene_info["dim"] = red
     heads = ["geom"]
     _fill(clips, "geom", run_head(clips, False, hidden=hidden, steps=steps, lr=lr, l2=l2, kfolds=kfolds, seed=seed))
     if have_scene:
@@ -311,7 +339,7 @@ def build_report(preds, traj, scene, *, time_step=0.1, k_waypoints=6, hidden=32,
     report = {
         "run_name": run_name, "split": split, "num_clips": len(clips),
         "scene_vectors_present": have_scene,
-        "scene_dim": int(clips[0]["scene"].shape[0]) if have_scene else 0,
+        "scene": scene_info,
         "ablation": "geom (dynamics+waypoints+dist_to_consensus) vs geom+scene (⊕ pooled VLM hidden state)",
         "hyperparams": {"hidden": hidden, "steps": steps, "lr": lr, "l2": l2, "kfolds": kfolds,
                         "k_waypoints": k_waypoints, "bootstrap": n_boot, "seed": seed},
@@ -339,7 +367,10 @@ def parse_args():
     p.add_argument("--run-name", default=None)
     p.add_argument("--predictions", type=Path, default=None)
     p.add_argument("--trajectories", type=Path, default=None)
-    p.add_argument("--scene", type=Path, default=None, help="NPZ of pooled hidden states, key '{sample_id}__scene_vec'.")
+    p.add_argument("--scene", type=Path, default=None,
+                   help="NPZ of hidden features: '{sid}__scene_vec' (shared 1-D) or '{sid}__expert_hidden' (per-candidate N x H).")
+    p.add_argument("--scene-pca", type=int, default=0,
+                   help="Shrink scene features to this many PCA dims before training (0=off). Fixes overfitting on huge hidden states.")
     p.add_argument("--time-step", type=float, default=0.1)
     p.add_argument("--k-waypoints", type=int, default=6)
     p.add_argument("--hidden", type=int, default=32)
@@ -354,13 +385,18 @@ def parse_args():
 
 
 def _load_scene(path):
+    """Load per-clip features. Accepts a shared 1-D vector ('{sid}__scene_vec') or a
+    per-candidate 2-D array N x H ('{sid}__expert_hidden'); the 2-D form is kept as-is."""
     if path is None:
         return None
     npz = np.load(path)
     out = {}
     for k in npz.files:
-        if k.endswith("__scene_vec"):
-            out[k[: -len("__scene_vec")]] = np.asarray(npz[k], dtype=float).reshape(-1)
+        for suf in ("__scene_vec", "__expert_hidden"):
+            if k.endswith(suf):
+                arr = np.asarray(npz[k], dtype=float)
+                out[k[: -len(suf)]] = arr.reshape(-1) if arr.ndim == 1 else arr
+                break
     return out or None
 
 
@@ -372,7 +408,8 @@ def main() -> int:
     scene = _load_scene(a.scene)
     report, _ = build_report(preds, traj, scene, time_step=a.time_step, k_waypoints=a.k_waypoints,
                              hidden=a.hidden, steps=a.steps, lr=a.lr, l2=a.l2, kfolds=a.kfolds,
-                             n_boot=a.bootstrap, seed=a.seed, run_name=a.run_name, split=a.split)
+                             n_boot=a.bootstrap, seed=a.seed, scene_pca=a.scene_pca,
+                             run_name=a.run_name, split=a.split)
     print(json.dumps(report, indent=2))
     out = a.out or (Path("outputs/runs") / a.run_name / "analysis" / "verifier_report.json" if a.run_name else None)
     if out:

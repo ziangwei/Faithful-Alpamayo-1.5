@@ -105,5 +105,58 @@ class Ablation(unittest.TestCase):
         self.assertNotIn("geomscene_ade", rep["overall"])
 
 
+def _make_highdim_scene(informative, num_clips=200, dim=34, seed=0):
+    """A shared scene padded with noise dims, to exercise --scene-pca."""
+    preds, traj, scene = _make_scene_data(informative, num_clips=num_clips, seed=seed)
+    rng = np.random.default_rng(seed + 99)
+    for sid in list(scene.keys()):
+        base = np.asarray(scene[sid], dtype=float)
+        scene[sid] = np.concatenate([base, rng.normal(0, 1.0, dim - base.shape[0])])
+    return preds, traj, scene
+
+
+def _make_per_candidate(num_clips=200, horizon=12, seed=0):
+    """Per-candidate 2-D features (N x 1): a one-hot of the GT-matching candidate -- directly
+    usable (no interaction needed), mimicking the diffusion-expert per-candidate hidden state."""
+    rng = np.random.default_rng(seed)
+    x = (0.5 * np.arange(horizon)).astype(float)
+    ramp = np.arange(horizon) / (horizon - 1)
+    preds, traj, scene = [], {}, {}
+    for ci in range(num_clips):
+        sid = f"clip{ci:04d}__0"
+        pref = int(rng.integers(1, 5))
+        traj[f"{sid}__gt_xyz"] = np.stack([x, DRIFTS[pref] * ramp, np.zeros(horizon)], axis=1)
+        cot = "The ego vehicle should come to a full stop." if ci % 2 == 0 else "Proceed straight."
+        rows = []
+        for tid, dr in enumerate(DRIFTS):
+            key = f"{sid}__traj_{tid}__pred_xyz"
+            traj[key] = np.stack([x, dr * ramp, np.zeros(horizon)], axis=1)
+            preds.append({"sample_id": sid, "trajectory_sample_id": tid, "pred_xyz_npz_key": key,
+                          "gt_xyz_npz_key": f"{sid}__gt_xyz", "cot": cot, "meta_action": "", "answer": ""})
+            rows.append([1.0 if tid == pref else 0.0])
+        scene[sid] = np.asarray(rows) + rng.normal(0, 0.05, (len(DRIFTS), 1))
+    return preds, traj, scene
+
+
+class PcaAndPerCandidate(unittest.TestCase):
+    def test_scene_pca_reduces_and_runs(self):
+        preds, traj, scene = _make_highdim_scene(True, seed=1)
+        rep, _ = M8.build_report(preds, traj, scene, hidden=32, steps=600, lr=0.02, l2=1e-3,
+                                 kfolds=5, n_boot=200, seed=1, scene_pca=8)
+        self.assertEqual(rep["scene"]["pca"], {"from": 34, "to": 8})
+        self.assertEqual(rep["scene"]["dim"], 8)
+        self.assertIn("geomscene_ade", rep["overall"])
+        self.assertLess(rep["overall"]["geomscene_ade"], rep["overall"]["first_ade"])
+
+    def test_per_candidate_scene_is_usable_and_beats_mbr(self):
+        preds, traj, scene = _make_per_candidate(seed=2)
+        rep, _ = M8.build_report(preds, traj, scene, hidden=32, steps=700, lr=0.02, l2=1e-3,
+                                 kfolds=5, n_boot=200, seed=2)
+        self.assertTrue(rep["scene"]["per_candidate"])
+        self.assertLess(rep["overall"]["geomscene_ade"], rep["overall"]["mbr_ade"])
+        self.assertGreater(
+            rep["significance_overall"]["geomscene_vs_geom"]["ade"]["ci95"][0], 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
