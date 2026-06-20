@@ -98,12 +98,29 @@ Four training-free selectors, none of which use GT:
 - The improvement is **selection-bounded by the oracle** (recovers ~26% of a ~51% gap);
   modest by design. Cheap post-hoc dynamics/intent features carry little selection signal —
   capturing more likely needs the model's visual context or internal state.
-- **Tier 2 (implemented):** a tiny **learned scorer** — ridge on within-clip ADE + L2 logistic
-  regression on is-best, numpy-only — selected by **leave-one-clip-out CV** over the existing
-  1,000 clips (no new GPU), with distance-to-consensus + dynamics features, scored against free
-  MBR via paired bootstrap CIs (`scripts/06_learned_rerank.py`). Honest expectation, baked into
-  the report's auto-verdict: cheap features ≈ MBR; beating it needs richer (visual/internal)
-  features, which could later guide the FlowMatching sampler.
+- **Tier 2 (done, n=1000): learning does *not* beat free MBR.** A tiny numpy-only learned
+  scorer (ridge on within-clip ADE; L2 logistic on is-best) selected by **leave-one-clip-out
+  CV** over the 1,000 clips (no new GPU), with distance-to-consensus + dynamics features, scored
+  vs free MBR by paired bootstrap (`scripts/06_learned_rerank.py`). The **ridge** reranker *ties*
+  MBR — ADE 1.634 vs 1.635; +25.8% vs +25.7% gap closed; vs-MBR 95% CI [−0.018, 0.019], 776/1000
+  ties — i.e. a model free to weight all features just **reconstructs consensus**, confirming MBR
+  is the ceiling of cheap post-hoc features. Framing the target as *classifying the single best*
+  (logreg) instead **underperforms doing nothing** (−5.4% vs first; loses to MBR, CI [−0.39,
+  −0.21]): the oracle-best candidate is usually an off-consensus lucky draw, so the classifier
+  learns to chase outliers and backfires — a clean regression-vs-classification lesson. Beating
+  MBR would need richer (visual/internal) features that could later guide the FlowMatching sampler.
+- **Tier 3 (done, n=1000): a learned set-network also loses to MBR.** A numpy DeepSets scorer
+  (`scripts/07_set_rerank.py`, backprop gradient-checked) sees all candidates' raw geometry and
+  learns its own consensus — deliberately *not* handed the MBR distance, to test whether a learned
+  aggregator can beat the arithmetic mean. It significantly beats the deployed first-sample (+11.6%
+  gap, CI [0.028, 0.199]) but **significantly loses to free MBR** (−0.135 m, CI [−0.199, −0.071];
+  recovers only ~half of MBR's gap), tying MBR only on the stop/yield subset. Forcing the model to
+  *discover* an aggregator yields a worse one than the closed-form mean.
+- **Triangulated conclusion:** three independent learned selectors — linear regression (handed the
+  consensus feature), is-best classification, and a permutation-invariant set-network (self-learned
+  aggregator) — all fail to beat a free arithmetic-mean consensus (ridge *ties*, logreg and the
+  set-net *lose*). **Geometry-only selection is exhausted at MBR**; the only remaining lever is the
+  model's internal scene representation → a frozen-VLM hidden-state verifier (next, `docs/tier3_hidden_state_verifier.md`).
 
 ## Reproduce
 
@@ -112,4 +129,6 @@ N=1000 RUN=val_cand5_n1000 bash scripts/run_baseline.sh   # val subset + multi-c
 python scripts/03c_oracle_gap.py  --run-name val_cand5_n1000   # oracle-gap decomposition
 python scripts/04_rerank.py       --run-name val_cand5_n1000   # selectors + bootstrap CIs
 python scripts/05_case_studies.py --run-name val_cand5_n1000   # win/loss case studies + plots
+python scripts/06_learned_rerank.py --run-name val_cand5_n1000 # B: ridge/logreg learned reranker (CPU)
+python scripts/07_set_rerank.py     --run-name val_cand5_n1000 # C: set-aggregator reranker (CPU)
 ```

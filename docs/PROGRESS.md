@@ -51,6 +51,7 @@
 6. `05_case_studies.py` — win/loss 案例 + 双栏图(top-down 轨迹 + 速度曲线 + CoT 注释)[CPU]
 7. `06_learned_rerank.py` — **B**:learned reranker(ridge + 逻辑回归,leave-one-clip-out CV)+ vs-first / vs-MBR bootstrap [CPU,numpy-only,无需 GPU]
 8. `07_set_rerank.py` — **C**:set-aggregator reranker(numpy DeepSets,permutation-invariant,k-fold CV)+ vs-MBR bootstrap [CPU,无需 GPU]
+9. `08_train_verifier.py` — **2.0**:hidden-state verifier head(numpy MLP,**geom vs geom+scene 消融**,k-fold CV)+ vs-MBR bootstrap [CPU;先 `02 --dump-hidden`(GPU)产出 scene 向量]
 
 一键 1–3:`run_baseline.sh`(`N=` 控制 clip 数,`RUN=` 命名,`LIMIT=` 冒烟)。最终 run:`N=1000 RUN=val_cand5_n1000`。
 
@@ -63,8 +64,9 @@
 
 - ✅ A 全部完成(n=1000 定稿):复现、数据、管线、oracle 诊断、consensus 显著结果、reasoning 负结果、bootstrap CI、case study、`docs/interview_summary.md`。
 - ✅ **B 完成(n=1000 真实数字已出)**:`scripts/06_learned_rerank.py`(numpy-only,LOO-CV)+ `tests/test_learned_rerank.py`(6 测试)。**结果:ridge 追平 MBR(+25.8%,vs-MBR CI 含 0、776/1000 平局),logreg 比不选更差(−5.4%)。结论 = learned 打不过免费 MBR,MBR 是廉价特征天花板;目标设定(回归 vs 分类)本身是干净的方法学结论。**
-- ✅ **C(set-aggregator)代码 + 测试完成**:`scripts/07_set_rerank.py`(numpy DeepSets,permutation-invariant,反向传播经**数值梯度检验**)+ `tests/test_set_rerank.py`(5 测试:梯度检验 + 行为)。攻击 MBR 的弱点(均值聚合器);合成数据上能真打败 MBR(证明工具有效)。**待办:服务器跑 `python scripts/07_set_rerank.py --run-name val_cand5_n1000`(CPU,无需 GPU);诚实预期仍 ≈ MBR(真实几何已榨干)。**
-- 📋 **Tier-3 主攻设计(未跑):** `docs/tier3_hidden_state_verifier.md` —— frozen-VLM hidden-state 上的 learned verifier(best-of-N + reward-model 范式),唯一可能真破 MBR 天花板的方向,需一次 GPU dump,不微调 10B。`05_case_studies.py` 已升级为双栏图(轨迹+速度+CoT),面试出图就绪。
+- ✅ **C(set-aggregator)完成(n=1000 真实数字已出)**:`scripts/07_set_rerank.py`(numpy DeepSets,梯度检验)+ `tests/test_set_rerank.py`(5 测试)。**结果:set-net 显著赢 first(+11.6% gap,CI[0.028,0.199])但显著输 MBR(−0.135,CI[−0.199,−0.071]),只捞回 MBR 一半的 gap;stop/yield 子集与 MBR 打平(CI 含 0)。故意不喂 dist_to_consensus、逼它自学聚合器 → 学出比算术均值更糙的共识。**
+- 🔑 **三重印证(纯几何选择见顶)**:B-ridge(线性,*喂*共识特征)**追平** MBR;B-logreg(分类)**反噬**;C-set-net(非线性,*自学*聚合)**显著输**。三种独立学习方法都打不过免费均值共识 → **几何选择在 MBR 见顶**,唯一杠杆是模型内部场景表征。
+- 🚀 **2.0 = hidden-state verifier head**:设计见 `docs/tier3_hidden_state_verifier.md`(v2.0);head 训练/评测脚本 `scripts/08_train_verifier.py`(+ 测试)已就绪,核心是 **geom-only vs geom+scene 消融**,直接量化"内部状态比纯几何多带多少选择信号"。待服务器 dump 一次 hidden state(需 GPU)后训 head。`05_case_studies.py` 已升级双栏图(轨迹+速度+CoT)。
 
 ## 5. B 交接 brief:learned reranker(Tier 2)
 

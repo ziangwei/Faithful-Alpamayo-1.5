@@ -1,72 +1,91 @@
-# Tier-3 plan: a learned verifier on the frozen VLM's hidden states
+# 2.0 设计:frozen-VLM hidden-state 上的 learned verifier head
 
 日期:2026-06-20
-状态:**设计文档(未运行)**。这是 A/B 之后唯一可能真正打破 MBR 天花板的方向,需要一次 GPU dump,不微调 10B。
+状态:**head 已实现并通过验证(`scripts/08_train_verifier.py` + `tests/test_train_verifier.py`,4 测试通过,含数值梯度检验),待服务器 dump 一次 hidden state(GPU)后训练。** 不微调 10B。
 
-## 1. 为什么是这个方向
+## 1. 为什么(1.0 的三重印证)
 
-A 证明了 ~51% 是可恢复的选择误差;免费 MBR 显著捞回 ~26%。B(`06`)与 set-aggregator(`07`)进一步证明:**只用输出几何 + 廉价动力学特征,学习打不过 MBR**——ridge 追平 MBR、logreg 反噬、放开手的 set 网络也只是把"共识"重新学了一遍。结论是天花板不在模型容量,在**信息量**:候选轨迹的 (x,y) 几何里没有"为什么这条更好"的场景依据。
+1.0 已经从三个角度证明**纯几何的选择空间在 MBR 见顶**:
 
-模型内部其实"知道"场景——前视相机里有没有行人、红灯、车道线、要不要让行——但这些信息在采样出 (x,y) 后就被丢掉了。**要打破 MBR,就得把模型的内部状态接出来当特征。** 这正是现代 LLM test-time scaling 的标准范式:**best-of-N 采样 + 一个学出来的 verifier / reward model 给候选打分**。本项目把它搬到驾驶 VLA 上。
+| 方法 | 给什么 | 结果 vs MBR |
+| --- | --- | --- |
+| B-ridge(线性回归) | *喂* dist-to-consensus | **追平**(CI 含 0、776/1000 平局) |
+| B-logreg(分类最优候选) | 同上 | **反噬**(比不选还差 −5.4%) |
+| C-set-net(非线性,DeepSets) | 让它*自学*聚合器 | **显著输**(只捞回 MBR 一半 gap) |
 
-## 2. 核心思想(一句话)
+三种独立学习方法都打不过免费的均值共识。结论:瓶颈不是模型容量,是**信息量**——候选轨迹的 (x,y) 几何里没有"为什么这条更安全"的场景依据。模型内部其实知道(前视相机里有没有行人/红灯/要不要让行),但采样出 (x,y) 后这些就丢了。**要破天花板,只能把模型的内部状态接出来当特征。**
 
-> 冻结 Alpamayo;对每条候选轨迹,从模型内部状态取一个特征向量;训一个小 verifier head 预测该候选的质量(ADE 排序),推理时选 argmin。对照免费 MBR,看场景信息能否真的超过纯共识。
+## 2. 核心思想:best-of-N + reward model
 
-不动 10B 主体,只训一个 <100K 参数的 head。与 A/B 同一套评测口径(LOO/k-fold CV + paired bootstrap vs MBR + stop/yield 子集)。
+> 冻结 Alpamayo;对每条候选,从 VLM 内部状态取一个池化向量;训一个 <100K 参数的 verifier head 预测候选质量(ADE 排序),推理时选 argmin。
 
-## 3. 抽什么特征(关键,且需在服务器上对模型确认)
+这正是现代 LLM test-time scaling 的标准范式(采样 N 条 + 一个学出来的 verifier/PRM 打分),搬到驾驶 VLA。不动 10B 主体,只训一个小 head;评测口径与 A/B/C 完全一致(k-fold/LOO CV + paired bootstrap vs MBR + stop/yield 子集)。
 
-候选之间共享同一次 VLM rollout(CoT 文本几乎相同),差异只在扩散 expert 采出的轨迹。所以判别信号要同时包含:
+## 3. 锋利的实验:geom vs geom+scene 消融(`08` 的核心)
 
-- **场景上下文(候选间共享)**:VLM 最后一层在轨迹起始 token / 池化后的 image token 上的 hidden state。它编码了"这是个 stop/yield 场景吗、前方有没有障碍"。这是几何特征完全没有的东西。
-- **候选轨迹嵌入(逐候选不同)**:把每条候选轨迹编码成向量(可复用 `07` 的 waypoints,或扩散 expert 对该样本的中间表示)。
+不是简单"加特征看涨没涨",而是一个能**直接量化 hidden state 边际价值**的消融。两个 head,除输入外完全相同:
 
-第一版最简单可跑的特征:`per_candidate_vec = [pooled VLM last-hidden-state(场景,共享)] ⊕ [07 的 waypoints+动力学(几何,逐候选)]`。哪怕只是"场景向量 + 已有几何",也已让 head 能学到**场景条件化的选择**(例:靠近斑马线 → 偏好减速那条),这是 aware/blind 启发式当年想做、但用文本 intent 做不到的事。
+- **geom**:动力学 + waypoints + **dist-to-consensus**(给了它共识特征 → 它*能*追平 MB,复现 B);
+- **geom+scene**:在 geom 之上 **⊕ 池化的 VLM hidden state**(新信息)。
 
-> 待在服务器上确认的点:`extra` 来自 `model(...)` 的第 3 个返回(见 `nav_utils.py` 的 `outputs[2]`);hidden state 的确切张量要在 `helper.py` 的 generate 路径 / 模型 forward 里定位。HF 系模型可用 `output_hidden_states=True`,或对喂给 FlowMatching expert 的那层挂 forward hook。
+**scene 的边际 = (geom+scene) − (geom)**,带 paired bootstrap CI,就是"内部状态比纯几何多带多少选择信号"的干净估计。`08` 报告里直接给两个判决:
 
-## 4. 怎么 dump(在 `02_run_baseline_inference.py` 加一个 flag)
+- `verdict_geomscene_vs_mbr`:verifier 整体打不打得过 MBR;
+- `verdict_scene_marginal`:**scene 是否真的 ADD 了几何之外的信号**(这条才是科学结论)。
 
-不重写推理,只在已有循环里多存一个张量。伪代码:
+**工具已验证(合成数据,双向都对):** scene 有信号时 → 边际 CI 显著为正、判 "scene ADDS";scene 是噪声时 → 边际 CI 含 0、判 "scene adds NO signal"(无假阳性)。所以一旦接上真 hidden state,这个脚本会诚实地告诉你内部状态到底有没有用。
+
+## 4. 抽什么 / 怎么 dump(`02 --dump-hidden`,需在服务器对模型确认)
+
+候选共享同一次 VLM rollout(CoT 几乎相同),差异只在采出的轨迹。所以第一版特征:
+
+- **场景向量(候选间共享)**:VLM 最后一层在轨迹起始 token / image token 上做 mean-pool → 一个 H 维向量。编码"这是不是 stop/yield 场景、前方有无障碍"。
+- **候选几何(逐候选)**:复用 `07/08` 的 waypoints + 动力学 + dist-to-consensus。
+
+dump 伪代码(在 `02_run_baseline_inference.py` 已有循环里加一存,不重写推理):
 
 ```python
-# 02_run_baseline_inference.py，--dump-hidden 时:
-# 取场景向量(候选间共享):VLM 最后一层、对 trajectory-start / image tokens 做 mean-pool
-hidden = model.vlm.last_hidden_state           # [B, T_tok, H]  (确切属性名以模型为准)
+# --dump-hidden 时,在拿到 extra(= outputs[2],见 nav_utils.py)的同一处:
+hidden = model.vlm.last_hidden_state            # [B, T_tok, H]  (确切属性名以模型为准)
 scene_vec = hidden[0, traj_start_slice].mean(0).float().cpu().numpy()   # [H]
-arrays[f"{sample_id}__scene_vec"] = scene_vec   # 每个 clip 一份,候选共享
-# 逐候选向量:复用 07 的 waypoints(已有 pred_xyz),或扩散 expert 中间态(若可取)
+arrays[f"{sample_id}__scene_vec"] = scene_vec   # 每 clip 一份,候选共享
+np.savez(out_dir / f"{split}_hidden.npz", **arrays)
 ```
 
-输出 `outputs/runs/<run>/baseline/<split>_hidden.npz`(key = `sample_id__scene_vec`),与现有 `predictions.jsonl` / `trajectories.npz` 同序对齐。**hidden state 很大,务必 pool 成一个向量再存**(单 clip 一个 H 维向量,1000 clip 完全可控)。
+> 待确认:HF 系可用 `output_hidden_states=True`;或对喂给 FlowMatching expert 的那层挂 forward hook。**hidden 很大,务必 pool 成一个向量再存**(1000 clip × H 维完全可控)。
 
-## 5. verifier head + 评测(`08_train_verifier.py`,骨架待写)
+## 5. head(`08_train_verifier.py`,已实现)
 
-结构与 `06`/`07` 同构,只是输入换成 hidden-state 特征:
+- 输入:见上;场景向量来自 `--scene <split>_hidden.npz`(key `{sample_id}__scene_vec`)。无该文件时只跑 geom head 作 sanity baseline 并明确标注。
+- 目标:clip 内 z-scored ADE(**回归**,选 argmin)——B 已证明回归比"分类最优候选"稳(后者追离群点反噬)。
+- 模型:小 MLP(1 隐层,numpy,Adam,**反向传播经数值梯度检验**),k-fold clip-level CV;高维 hidden 用标准化 + L2 + k-fold 控过拟合。
+- 评测:first / MBR / geom / geom+scene / oracle,paired bootstrap(geom_vs_mbr、**geomscene_vs_mbr**、**geomscene_vs_geom**),overall + stop/yield,自动 verdict。
 
-- 特征:`scene_vec`(广播到 5 条候选)⊕ 逐候选 waypoints/动力学。
-- 目标:clip 内 z-scored ADE(回归,选 argmin)——`06` 证明回归比"分类最优候选"稳(后者追离群点反噬)。
-- 模型:小 MLP(1–2 隐层,强 L2 / dropout),**k-fold 或 LOO CV**;1000 clip 上务必强正则防过拟合。
-- 评测:vs first / vs **MBR**(关键)/ vs oracle,paired bootstrap CI + 输赢,overall + stop/yield。复用 `07` 的 `paired_bootstrap` / `analyze` / `verdict_from_ci`。
+运行(dump 完之后):
 
-## 6. 诚实预期
+```bash
+python scripts/08_train_verifier.py --run-name val_cand5_n1000 \
+    --scene outputs/runs/val_cand5_n1000/baseline/val_hidden.npz
+```
 
-这是**唯一**可能真正 >MBR 的方向,但不保证:
+## 6. 里程碑
 
-- **乐观**:场景向量带来纯几何没有的信号,verifier 在 stop/yield 等场景显著超过 MBR → 干净的正结果,且故事完整("廉价特征到顶 → 接内部状态破顶")。
-- **保守**:1000 clip 对高维 hidden 特征容易过拟合,或 first-sample 的 CoT 已把场景信息"用掉"了 → verifier ≈ MBR。那也是有价值的结论(选择信号不在可线性读出的 hidden 子空间里)。
+1. **dump**:给 `02` 加 `--dump-hidden`,重跑一次推理(GPU,≈ baseline 成本),产出 `val_hidden.npz`。← 唯一需要 GPU 的一步
+2. **train+ablate**:`08` 训 geom 与 geom+scene,出 `verdict_scene_marginal`。← CPU 秒级,脚本已就绪
+3. **若 scene 显著**:加 stop/yield 分场景报告 + case study(scene 帮对了哪些 MBR 选错的 clip);若不显著:也是干净结论(选择信号不在可线性读出的 hidden 子空间)。
+4. **(可选)v2.1**:把 scene 也喂给 set-pooling(`07` 的结构)做联合;或用 verifier 分数去 guide FlowMatching 采样。
 
-无论哪种,口径都和 A/B 一致:k-fold/LOO + CI,不在 1000 上吹显著 SOTA。
+## 7. 诚实预期
 
-## 7. 成本与边界
+这是**唯一**可能真 >MBR 的方向,但不保证:
 
-- 需**重跑一次推理** dump hidden(≈ baseline 的 GPU 成本),之后训 head 是 CPU 秒级。
-- 不微调 10B、不接世界模型、不做闭环 RL。
-- 仍是**开环 ADE** 口径,结论同样受"ADE ≠ 闭环安全"约束(面试需主动说明)。
+- **乐观**:场景向量带来纯几何没有的信号,`verdict_scene_marginal` 显著为正、verifier 在 stop/yield 超过 MBR → 干净正结果,故事闭环("几何到顶 → 接内部状态破顶")。
+- **保守**:1000 clip 对高维 hidden 易过拟合,或 first-sample 的 CoT 已把场景信息"用掉" → 边际 ≈ 0。那也是有价值的结论,且因为有 geom-only 对照,排除了"特征工程没做好"的质疑。
+
+口径不变:k-fold/LOO + CI,不在 1000 上吹显著 SOTA;仍是**开环 ADE**(面试需主动说明 ≠ 闭环安全)。
 
 ## 8. 面试表述
 
-> "我先证明了廉价后验特征已经到了 MBR 的天花板(回归追平、分类反噬、set 网络也只是重学共识),所以原则上的下一步是一个 frozen-VLM hidden-state 上的 learned verifier——就是 best-of-N + reward model 那套 test-time scaling 范式——因为只有模型内部状态才带着输出几何丢掉的场景理解。这是我会做的 Tier-3,不动 10B。"
+> "我先用线性回归、分类、和置换不变集合网络三种学习方法证明了纯几何选择在 MBR 见顶,所以原则上的下一步是 frozen-VLM hidden-state 上的 learned verifier——就是 best-of-N + reward model 那套 test-time scaling 范式。我把它设计成一个 geom vs geom+scene 的消融,直接量化内部状态比几何多带多少选择信号,head 和评测都写好且数值梯度检验过了,只差在服务器上 dump 一次 hidden state。"
 
-不声称已实现/已跑;这是有据可依的下一步设计。
+不声称已跑出正结果;这是有据可依、且工具已验证的下一步。
