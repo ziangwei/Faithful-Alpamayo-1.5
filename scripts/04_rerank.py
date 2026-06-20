@@ -119,6 +119,8 @@ def analyze(clips: list[dict[str, Any]]) -> dict[str, Any]:
     ba = [c["blind_ade"] for c in clips]; bf = [c["blind_fde"] for c in clips]
     oa = [c["oracle_ade"] for c in clips]; of = [c["oracle_fde"] for c in clips]
     ra = [c["rand_ade"] for c in clips]
+    ca = [c["centroid_ade"] for c in clips]; cf = [c["centroid_fde"] for c in clips]
+    mca, mcf = _mean(ca), _mean(cf)
     mfa, moa, maa, mba = _mean(fa), _mean(oa), _mean(aa), _mean(ba)
     mff, mof, maf, mbf = _mean(ff), _mean(of), _mean(af), _mean(bf)
 
@@ -136,6 +138,9 @@ def analyze(clips: list[dict[str, Any]]) -> dict[str, Any]:
         "aware_gap_closed_fde_pct": closed(maf, mff, mof),
         "blind_gap_closed_ade_pct": closed(mba, mfa, moa),
         "aware_intervention_rate": round(_mean([1.0 if c["aware_idx"] != c["first_idx"] else 0.0 for c in clips]), 3),
+        "centroid_ade": round(mca, 4), "centroid_fde": round(mcf, 4),
+        "centroid_gap_closed_ade_pct": closed(mca, mfa, moa),
+        "centroid_vs_first": winloss(ca, fa),
         "aware_vs_first": winloss(aa, fa),
         "aware_vs_blind": winloss(aa, ba),
     }
@@ -157,7 +162,7 @@ def main() -> int:
         m = compute_trajectory_metrics(pred_xyz, traj[gk].tolist(), time_step=a.time_step)
         groups.setdefault(p["sample_id"], []).append({
             "tid": p.get("trajectory_sample_id", 0), "ade": m["ade_m"], "fde": m["fde_m"],
-            "feat": candidate_features(pred_xyz, a.time_step),
+            "xyz": pred_xyz, "feat": candidate_features(pred_xyz, a.time_step),
             "cot": p.get("cot"), "meta_action": p.get("meta_action"), "answer": p.get("answer"),
         })
 
@@ -175,6 +180,9 @@ def main() -> int:
         aware_idx, aware_scores = select(cands, lambda fz: score_aware(fz, intents), a.gate_margin, first_idx)
         blind_idx, _ = select(cands, score_blind, a.gate_margin, first_idx)
         oracle_idx = min(range(len(cands)), key=lambda i: cands[i]["ade"])
+        _arrs = [np.asarray(c["xyz"], dtype=float)[:, :2] for c in cands]
+        _centroid = np.mean(_arrs, axis=0)
+        centroid_idx = min(range(len(cands)), key=lambda i: float(np.mean(np.linalg.norm(_arrs[i] - _centroid, axis=1))))
         clips.append({
             "first_idx": first_idx, "aware_idx": aware_idx,
             "first_ade": c0["ade"], "first_fde": c0["fde"],
@@ -182,6 +190,7 @@ def main() -> int:
             "blind_ade": cands[blind_idx]["ade"], "blind_fde": cands[blind_idx]["fde"],
             "oracle_ade": cands[oracle_idx]["ade"], "oracle_fde": cands[oracle_idx]["fde"],
             "rand_ade": _mean([c["ade"] for c in cands]), "intents": sorted(intents),
+            "centroid_ade": cands[centroid_idx]["ade"], "centroid_fde": cands[centroid_idx]["fde"],
         })
         selection_rows.append({
             "sample_id": sid, "intents": sorted(intents), "cot": c0["cot"],

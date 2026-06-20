@@ -35,6 +35,13 @@
 
 **结论:绿灯。** 选择误差巨大且真实(random≈first 说明不是运气),候选轨迹多样(尽管 cot 文本几乎一致),stop/yield 子集 gap 更大——正是目标场景。→ 值得做 reranker。
 
+### Tier 1 结果:启发式 reranker(60 clip,2026-06-20)
+
+- 全 val:aware 关掉 gap **-1.8% ADE**(平局偏负),胜负 22:28;**aware ≈ blind**(57/60 选一样)→ intent 几乎没改变选择。
+- stop/yield(n=9):aware 关掉 **24% ADE**、20% FDE,5 赢 3 输——目标场景有信号但 n 太薄。
+- 判断:**手调启发式弱**。下一步两条路:① **质心/consensus 选择**(免费、有原则,已加进 `04_rerank.py`,待 60 clip 重跑验证);② **learned reranker**(Tier 2,train split 上训小模型)。先看质心结果再决定。
+- 成本澄清:多候选 = 1×VLM rollout + 5×廉价扩散采样,**非 5× 全推理**(~13s/clip 出 5 条为证);性价比顾虑大概率不成立,待 `--num-traj-samples 1` 计时确认。
+
 ## 明日要跑的命令
 
 ```bash
