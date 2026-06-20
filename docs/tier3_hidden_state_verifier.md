@@ -1,7 +1,7 @@
 # 2.0 设计:frozen-VLM hidden-state 上的 learned verifier head
 
 日期:2026-06-20
-状态:**head 已实现并通过验证(`scripts/08_train_verifier.py` + `tests/test_train_verifier.py`,4 测试通过,含数值梯度检验),待服务器 dump 一次 hidden state(GPU)后训练。** 不微调 10B。
+状态:**2.0 代码已全部就绪。** dump = `02 --dump-hidden`(forward-hook VLM text decoder,`tests/test_dump_hidden.py` 7 单测过);head = `scripts/08_train_verifier.py`(+ `tests/test_train_verifier.py`,4 测试,含数值梯度检验)。**只剩一步 GPU**:重跑一次推理 dump hidden,再训 head。不微调 10B。
 
 ## 1. 为什么(1.0 的三重印证)
 
@@ -35,7 +35,10 @@
 
 **工具已验证(合成数据,双向都对):** scene 有信号时 → 边际 CI 显著为正、判 "scene ADDS";scene 是噪声时 → 边际 CI 含 0、判 "scene adds NO signal"(无假阳性)。所以一旦接上真 hidden state,这个脚本会诚实地告诉你内部状态到底有没有用。
 
-## 4. 抽什么 / 怎么 dump(`02 --dump-hidden`,需在服务器对模型确认)
+## 4. 抽什么 / 怎么 dump(`02 --dump-hidden`,**已实现**)
+
+> **实现**:不改模型,在 `load_model` 里对 VLM text decoder(自动解析 `vlm.model.language_model`,可 `--hidden-module` 覆盖)挂 forward hook,保留**最长**那次前向(= prefill,处理完整 images+prompt+CoT),再对 batch×token 做 mean-pool → 每 clip 一个 H 维 `scene_vec`,存 `<split>_hidden.npz`(key `{sample_id}__scene_vec`)。运行时打印向量维度供 sanity check(应 ≈ hidden-size,**不是** vocab-size;若不对,用 `--hidden-module` 指定正确子模块)。
+> 命令:`python scripts/02_run_baseline_inference.py --run-name val_cand5_n1000 --split val --num-traj-samples 5 --execute --dump-hidden`(记得 `export HF_HUB_DISABLE_XET=1`,别设 `HF_HOME`)。
 
 候选共享同一次 VLM rollout(CoT 几乎相同),差异只在采出的轨迹。所以第一版特征:
 

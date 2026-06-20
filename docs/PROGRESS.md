@@ -66,7 +66,7 @@
 - ✅ **B 完成(n=1000 真实数字已出)**:`scripts/06_learned_rerank.py`(numpy-only,LOO-CV)+ `tests/test_learned_rerank.py`(6 测试)。**结果:ridge 追平 MBR(+25.8%,vs-MBR CI 含 0、776/1000 平局),logreg 比不选更差(−5.4%)。结论 = learned 打不过免费 MBR,MBR 是廉价特征天花板;目标设定(回归 vs 分类)本身是干净的方法学结论。**
 - ✅ **C(set-aggregator)完成(n=1000 真实数字已出)**:`scripts/07_set_rerank.py`(numpy DeepSets,梯度检验)+ `tests/test_set_rerank.py`(5 测试)。**结果:set-net 显著赢 first(+11.6% gap,CI[0.028,0.199])但显著输 MBR(−0.135,CI[−0.199,−0.071]),只捞回 MBR 一半的 gap;stop/yield 子集与 MBR 打平(CI 含 0)。故意不喂 dist_to_consensus、逼它自学聚合器 → 学出比算术均值更糙的共识。**
 - 🔑 **三重印证(纯几何选择见顶)**:B-ridge(线性,*喂*共识特征)**追平** MBR;B-logreg(分类)**反噬**;C-set-net(非线性,*自学*聚合)**显著输**。三种独立学习方法都打不过免费均值共识 → **几何选择在 MBR 见顶**,唯一杠杆是模型内部场景表征。
-- 🚀 **2.0 = hidden-state verifier head**:设计见 `docs/tier3_hidden_state_verifier.md`(v2.0);head 训练/评测脚本 `scripts/08_train_verifier.py`(+ 测试)已就绪,核心是 **geom-only vs geom+scene 消融**,直接量化"内部状态比纯几何多带多少选择信号"。待服务器 dump 一次 hidden state(需 GPU)后训 head。`05_case_studies.py` 已升级双栏图(轨迹+速度+CoT)。
+- 🚀 **2.0 = hidden-state verifier head(代码已全部就绪)**:① dump —— `02 --dump-hidden`(forward-hook VLM text decoder,池化 prefill → 每 clip 一个 scene 向量;`tests/test_dump_hidden.py` 7 单测过);② head —— `08_train_verifier.py` 的 **geom vs geom+scene 消融**(梯度检验,4 测试),直接量化"内部状态比纯几何多带多少选择信号";③ 设计 `docs/tier3_hidden_state_verifier.md`(v2.0)。**只剩一步 GPU**:`02 … --dump-hidden` 重跑一次产 `val_hidden.npz`,再 `08 --scene …`。`05` 已升级双栏图(轨迹+速度+CoT)。
 
 ## 5. B 交接 brief:learned reranker(Tier 2)
 

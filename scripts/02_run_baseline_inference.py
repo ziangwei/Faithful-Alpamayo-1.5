@@ -69,6 +69,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-jsonl", type=Path, default=None)
     parser.add_argument("--trajectories-npz", type=Path, default=None)
     parser.add_argument("--runtime-jsonl", type=Path, default=None)
+
+    # 2.0 verifier: dump a pooled VLM hidden-state "scene" vector per clip.
+    parser.add_argument(
+        "--dump-hidden",
+        action="store_true",
+        help="Also save a pooled VLM hidden-state 'scene' vector per clip for the verifier head (08).",
+    )
+    parser.add_argument(
+        "--hidden-module",
+        default=None,
+        help="Dotted submodule to hook for hidden states (default: auto-detect the VLM text decoder).",
+    )
+    parser.add_argument("--hidden-npz", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -83,6 +96,61 @@ def torch_dtype(torch_module: Any, dtype_name: str) -> Any:
     if dtype_name == "float16":
         return torch_module.float16
     return torch_module.float32
+
+
+class HiddenCapture:
+    """Forward hook that keeps the pooled last-hidden-state of the VLM's prefill pass.
+
+    During ``vlm.generate`` the hooked text-decoder runs once over the full prompt
+    (images + text -- the longest forward) then once per decoded token. We keep the
+    longest pass (the prefill = the scene/context representation) and mean-pool it over
+    batch and tokens into a single hidden-size vector. This is the candidate-shared
+    "scene" feature consumed by the verifier head (scripts/08_train_verifier.py).
+    """
+
+    def __init__(self) -> None:
+        self._best = None
+        self._best_tokens = -1
+
+    def __call__(self, module: Any, inputs: Any, output: Any) -> None:
+        h = getattr(output, "last_hidden_state", None)
+        if h is None:
+            h = output[0] if isinstance(output, (tuple, list)) else output
+        try:
+            if hasattr(h, "dim") and h.dim() == 3 and int(h.shape[1]) > self._best_tokens:
+                self._best_tokens = int(h.shape[1])
+                self._best = h.detach().float().mean(dim=(0, 1)).cpu().numpy()
+        except Exception:
+            pass  # never let hidden capture break inference
+
+    def take(self):
+        v, self._best, self._best_tokens = self._best, None, -1
+        return v
+
+
+def resolve_vlm_module(model: Any, dotted: str | None):
+    """Return (submodule, path) of the VLM text decoder to hook.
+
+    ``self.vlm`` is a Qwen3VLForConditionalGeneration; its text decoder is the module
+    that emits per-token hidden states. We try a configurable path first, then sensible
+    fallbacks. The user can override with --hidden-module if the printed shape looks wrong
+    (the pooled vector should be hidden-size ~= a few thousand, NOT vocab-size).
+    """
+    candidates = [dotted] if dotted else [
+        "vlm.model.language_model", "vlm.language_model", "vlm.model", "vlm",
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        obj, ok = model, True
+        for part in path.split("."):
+            if not hasattr(obj, part):
+                ok = False
+                break
+            obj = getattr(obj, part)
+        if ok:
+            return obj, path
+    raise AttributeError(f"Could not resolve a VLM submodule to hook; tried {candidates}")
 
 
 def build_avdi() -> Any:
@@ -105,7 +173,7 @@ def resolve_camera_features(avdi: Any, record: dict[str, Any]) -> list[Any] | No
     return [getattr(avdi.features.CAMERA, name) for name in names]
 
 
-def load_model(args: argparse.Namespace, torch: Any) -> tuple[Any, Any]:
+def load_model(args: argparse.Namespace, torch: Any) -> tuple[Any, Any, Any]:
     from alpamayo1_5 import helper
     from alpamayo1_5.models.alpamayo1_5 import Alpamayo1_5
 
@@ -117,7 +185,13 @@ def load_model(args: argparse.Namespace, torch: Any) -> tuple[Any, Any]:
     ).to(args.device)
     model.eval()
     processor = helper.get_processor(model.tokenizer)
-    return model, processor
+    capture = None
+    if getattr(args, "dump_hidden", False):
+        capture = HiddenCapture()
+        module, path = resolve_vlm_module(model, args.hidden_module)
+        module.register_forward_hook(capture)
+        print(f"[dump-hidden] hooked VLM submodule: {path}")
+    return model, processor, capture
 
 
 def run_one_record(
@@ -128,7 +202,8 @@ def run_one_record(
     model: Any,
     processor: Any,
     torch: Any,
-) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    capture: Any = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], Any]:
     from alpamayo1_5 import helper
     from alpamayo1_5.load_physical_aiavdataset import load_physical_aiavdataset
 
@@ -229,7 +304,8 @@ def run_one_record(
         "runtime_sec": runtime_sec,
         "max_cuda_memory_gb": max_cuda_memory_gb,
     }
-    return rows, arrays, runtime_row
+    scene_vec = capture.take() if capture is not None else None
+    return rows, arrays, runtime_row, scene_vec
 
 
 def run_execute(
@@ -238,6 +314,7 @@ def run_execute(
     output_jsonl: Path,
     trajectories_npz: Path,
     runtime_jsonl: Path,
+    hidden_npz: Path | None = None,
 ) -> None:
     import numpy as np
     import torch
@@ -247,15 +324,16 @@ def run_execute(
     runtime_jsonl.parent.mkdir(parents=True, exist_ok=True)
 
     avdi = build_avdi()
-    model, processor = load_model(args, torch)
+    model, processor, capture = load_model(args, torch)
     all_arrays: dict[str, Any] = {}
+    hidden_arrays: dict[str, Any] = {}
 
     with output_jsonl.open("w", encoding="utf-8") as predictions_stream, runtime_jsonl.open(
         "w", encoding="utf-8"
     ) as runtime_stream:
         for sample_index, record in enumerate(selected_records):
             try:
-                rows, arrays, runtime_row = run_one_record(
+                rows, arrays, runtime_row, scene_vec = run_one_record(
                     record=record,
                     sample_index=sample_index,
                     args=args,
@@ -263,6 +341,7 @@ def run_execute(
                     model=model,
                     processor=processor,
                     torch=torch,
+                    capture=capture,
                 )
             except Exception as exc:
                 runtime_row = {
@@ -283,12 +362,21 @@ def run_execute(
                 write_jsonl_row(predictions_stream, row)
             write_jsonl_row(runtime_stream, runtime_row)
             all_arrays.update(arrays)
+            if scene_vec is not None:
+                if not hidden_arrays:
+                    print(f"[dump-hidden] scene vector dim = {tuple(scene_vec.shape)} "
+                          f"(should be hidden-size ~ a few thousand, NOT vocab-size)")
+                hidden_arrays[f"{make_sample_id(record, sample_index)}__scene_vec"] = scene_vec
             print(
                 f"[{sample_index + 1}/{len(selected_records)}] "
                 f"{record['clip_id']} runtime={runtime_row['runtime_sec']:.2f}s"
             )
 
     np.savez_compressed(trajectories_npz, **all_arrays)
+    if getattr(args, "dump_hidden", False) and hidden_arrays and hidden_npz is not None:
+        hidden_npz.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(hidden_npz, **hidden_arrays)
+        print(f"Wrote hidden scene vectors: {hidden_npz}  ({len(hidden_arrays)} clips)")
 
 
 def main() -> int:
@@ -297,6 +385,7 @@ def main() -> int:
     output_jsonl = args.output_jsonl or default_paths["predictions"]
     trajectories_npz = args.trajectories_npz or default_paths["trajectories"]
     runtime_jsonl = args.runtime_jsonl or default_paths["runtime"]
+    hidden_npz = args.hidden_npz or (trajectories_npz.parent / f"{args.split}_hidden.npz")
 
     records = load_manifest_records(args.manifest)
     selected_records = select_manifest_records(records, split=args.split, limit=args.limit)
@@ -309,16 +398,21 @@ def main() -> int:
     summary["output_jsonl"] = str(output_jsonl)
     summary["trajectories_npz"] = str(trajectories_npz)
     summary["runtime_jsonl"] = str(runtime_jsonl)
+    if args.dump_hidden:
+        summary["hidden_npz"] = str(hidden_npz)
     print(json.dumps(summary, indent=2, sort_keys=True))
 
     if not args.execute:
         print("Dry run only. Re-run with --execute to load Alpamayo and PhysicalAI-AV.")
         return 0
 
-    run_execute(selected_records, args, output_jsonl, trajectories_npz, runtime_jsonl)
+    run_execute(selected_records, args, output_jsonl, trajectories_npz, runtime_jsonl,
+                hidden_npz=hidden_npz if args.dump_hidden else None)
     print(f"Wrote predictions: {output_jsonl}")
     print(f"Wrote trajectories: {trajectories_npz}")
     print(f"Wrote runtime: {runtime_jsonl}")
+    if args.dump_hidden:
+        print(f"Wrote hidden scene vectors: {hidden_npz}")
     return 0
 
 
