@@ -380,6 +380,8 @@ def parse_args():
     p.add_argument("--kfolds", type=int, default=5)
     p.add_argument("--bootstrap", type=int, default=2000)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--tag", default=None,
+                   help="Label in the output filename (default: auto from --scene + --scene-pca). Stops different runs clobbering each other's report.")
     p.add_argument("--out", type=Path, default=None)
     return p.parse_args()
 
@@ -411,7 +413,8 @@ def main() -> int:
                              n_boot=a.bootstrap, seed=a.seed, scene_pca=a.scene_pca,
                              run_name=a.run_name, split=a.split)
     print(json.dumps(report, indent=2))
-    out = a.out or (Path("outputs/runs") / a.run_name / "analysis" / "verifier_report.json" if a.run_name else None)
+    tag = a.tag or ((a.scene.stem if a.scene else "geom") + (f"_pca{a.scene_pca}" if a.scene_pca and a.scene_pca > 0 else ""))
+    out = a.out or (Path("outputs/runs") / a.run_name / "analysis" / f"verifier_report__{tag}.json" if a.run_name else None)
     if out:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")

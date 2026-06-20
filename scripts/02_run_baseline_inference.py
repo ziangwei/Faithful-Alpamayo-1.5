@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         help="Actually load model/data and run inference.",
     )
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow overwriting an existing run's predictions/trajectories (default: refuse, to protect prior runs).",
+    )
 
     parser.add_argument("--model-id", default="nvidia/Alpamayo-1.5-10B")
     parser.add_argument("--device", default="cuda")
@@ -468,6 +473,12 @@ def main() -> int:
     if not args.execute:
         print("Dry run only. Re-run with --execute to load Alpamayo and PhysicalAI-AV.")
         return 0
+
+    if output_jsonl.exists() and not args.overwrite:
+        raise SystemExit(
+            f"Refusing to overwrite existing predictions: {output_jsonl}\n"
+            f"  -> use a NEW --run-name (recommended; leaves your baseline run untouched),\n"
+            f"     or pass --overwrite to replace it on purpose.")
 
     run_execute(selected_records, args, output_jsonl, trajectories_npz, runtime_jsonl,
                 hidden_npz=hidden_npz if args.dump_hidden else None,
