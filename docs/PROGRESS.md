@@ -1,124 +1,96 @@
-# Faithful-Alpamayo-1.5 — 实时进度与规划
+# Faithful-Alpamayo-1.5 — 项目状态与交接(单一事实来源)
 
-> 单一事实来源(single source of truth)。每次推进后更新这里。
-> 方法论细节见 `technical_route_reassessment_zh.md`;旧的 LoRA/RLHF 路线(`implementation_plan.md`)已废弃。
+> **新会话从这里读起。** 本文件 + `docs/interview_summary.md` 足以了解全局并直接开工 B。
+> 方法细节见 `technical_route_reassessment_zh.md`;旧 LoRA 路线 `implementation_plan.md` 已废弃。
 
 最后更新:2026-06-20
 
-## 一句话定位
+## 1. 一句话 + 现在的结论
 
-不微调 10B Alpamayo,而是在推理阶段做 **reasoning-aware 轨迹 reranker**:从多候选轨迹里,用 CoC intent + 动力学特征选更合理的一条。核心问题 = 量化"选择误差 vs 生成误差",并检验 reasoning 对选轨迹是否真有用(faithfulness)。
+不微调 10B Alpamayo,在推理阶段从它生成的多条候选轨迹里**选**更好的一条。
 
-## 当前状态
+**结论(n=300 已确证)**:模型部署的 first-sample 留了 **~47% 可恢复的*选择*误差**;一个免费、无训练的 **consensus / Minimum-Bayes-Risk 选择器**显著捞回 **~16% ADE / ~22% FDE**;而 **reasoning-aware 选择无效(null)**。
 
-- ✅ Alpamayo 1.5 单/多 clip 推理跑通(SDPA,单 H100)
-- ✅ 数据:官方 PhysicalAI-AV,流式取数(**不占盘**),元数据 parquet 已缓存
-- ✅ val 子集构建:官方 val split + 传感器过滤 + 分层抽样(`01b`)
-- ✅ 多候选 baseline:60 clip × 5 候选,已落盘(`outputs/runs/val_cand5/`)
-- ✅ **Gate B 通过(强绿灯)** —— 见决策记录
-- ✅ reranker(aware + blind)写好测好(`04_rerank.py`)
-- ⬜ 明日:在 60 clip 上跑 `04_rerank`,看 aware 关掉多少 gap、是否强过 blind
-- ⬜ 然后:scale 到 300 clip 出正式数(GPU,~1h)
-- ⬜ 之后:置信门控、case study 可视化、(可选)learned reranker
+## 2. 关键数据结果(官方 val,300 clips × 5 候选,95% bootstrap CI)
 
-## 决策记录:Gate B(oracle best-of-N,60 clip,2026-06-20)
+误差分解(oracle 仅用于分析,不用于选择):
+- first-sample ADE **1.762** / FDE **5.524**;oracle best-of-5 ADE **0.925** / FDE **2.949** → **~47% 是选择误差**。
+- first ≈ random(1.762 vs 1.851)→ 选择空间真实,非运气。
 
-| 指标 | 全 val (60) | stop/yield (9) |
-| --- | --- | --- |
-| first-sample ADE | 1.54 m | 2.49 m |
-| oracle ADE | 0.66 m | 0.73 m |
-| **ADE gap** | **57%** | **71%** |
-| FDE gap | 57% | 68% |
-| random ≈ first | 是(1.60 vs 1.54) | 是 |
-| 可改进 clip 占比 | 78% | 78% |
-| 候选 ADE 多样性 std | 0.72 m | 1.06 m |
+选择器对比(均不用 GT):
 
-**结论:绿灯。** 选择误差巨大且真实(random≈first 说明不是运气),候选轨迹多样(尽管 cot 文本几乎一致),stop/yield 子集 gap 更大——正是目标场景。→ 值得做 reranker。
+| 方法 | ADE | FDE | vs first(ADE 改善, 95%CI) |
+| --- | --- | --- | --- |
+| first-sample(部署) | 1.762 | 5.524 | — |
+| reasoning-blind | 1.805 | 5.586 | 负,不显著 |
+| reasoning-aware | 1.769 | 5.578 | **null**: +0.00, CI[−0.15, 0.15] |
+| **consensus / MBR** | **1.625** | **4.958** | **+0.14, CI[0.03, 0.25]**, 99%>0 |
+| oracle best-of-5 | 0.925 | 2.949 | 上界 |
 
-### Tier 1 结果:启发式 reranker(60 clip,2026-06-20)
+- **consensus 显著**:ADE CI 不含 0;FDE +0.57 CI[0.18, 0.96];胜负 vs first = **148/89/63**。
+- **reasoning-aware ≈ reasoning-blind(260/300 tie)** → CoC reasoning 对选轨迹**无额外信号**(faithfulness-via-reranking 失败,诚实负结果)。
+- **stop/yield 子集(n=61)**:consensus FDE 显著 CI[0.05, 1.63],**ADE 仅 suggestive**(+0.15, 89%>0, CI 跨 0)→ 子集 n 不够(见 §8)。
+- 机制(case study):consensus 赢在救回离谱的 first-sample(4.50→0.79),输在 first 本就极好时被拉向均值(0.46→4.21)。
+- 成本:多候选仅 **~1.4×**(1 候选 ~9s,5 候选 ~13s),非 5×。
 
-- 全 val:aware 关掉 gap **-1.8% ADE**(平局偏负),胜负 22:28;**aware ≈ blind**(57/60 选一样)→ intent 几乎没改变选择。
-- stop/yield(n=9):aware 关掉 **24% ADE**、20% FDE,5 赢 3 输——目标场景有信号但 n 太薄。
-- 判断:**手调启发式弱;质心也不行**——质心 overall 仅 +5.6% 但胜负 25:24(掷硬币),stop/yield **-11.6%(更差)**。即廉价后处理选择 overall 抓不到那 57% gap。
-- **唯一亮点:stop/yield 上 aware(+24%)> blind(+16.8%)> first(0)> 质心(-11.6%)**,顺序合理——intent-aware 在安全关键场景有效、且强过 intent-blind(faithfulness 信号),但 n=9。
-- 成本已确认:1 候选 ~9s,5 候选 ~13s → 多候选仅 **~1.4×**,非 5×,性价比顾虑排除。
-- **决定:scale 到 300**,验证 stop/yield 的 aware>blind 是真信号还是 n=9 噪声(子集→~45)。然后再决定:坐实"reasoning 在 stop/yield 有用"的正面 claim / 转成诊断叙事 / 上 learned reranker。
+## 3. 数据 & 管线
 
-### n=300 决定性结果(2026-06-20)— 项目主线确定
+- 数据集 `nvidia/PhysicalAI-Autonomous-Vehicles` 官方 val。**流式取数,不占盘/不占 inode**。
+- **没有 `vla_golden.parquet`**;索引是 `clip_index.parquet`(`clip_is_valid`/`chunk`/`split`),元数据 `metadata/data_collection.parquet`(`country`/`month`/`hour_of_day`/`platform_class`/`radar_config`,**clip_id 是索引**)+ `feature_presence.parquet`(各传感器存在标志)。三表等长同序。
+- 模型 `nvidia/Alpamayo-1.5-10B`,bf16,`attn_implementation=sdpa`,单 H100。轨迹由**官方 FlowMatching 扩散器**采样,**不返回 per-轨迹分数**(关键:所以必须外部选择)。
 
-- **reasoning-aware 启发式被证伪**:overall ADE -0.8%、stop/yield **-12.9%**(n=9 的 +24% 是小样本噪声,scale 后归零转负)。`aware ≈ blind` 处处成立 → intent 不改变选择。**"reasoning 帮选轨迹"的正面 claim 死亡**(诚实负结果;亲手 scale 杀掉自己的假阳性 = 面试强加分)。
-- **真正有效:consensus/质心(MBR)选择。** overall ADE gap 关掉 **+16.4%**(胜负 148:89)、FDE ~22%;stop/yield ADE **+18.7%**(29:18)、FDE ~31%。overall 与子集一致为正,n=300 下基本显著。**零训练、零额外推理、有原则。**
-- **这是项目正面主线**,框架名 = **Minimum Bayes Risk / self-consistency 选择**(轨迹版,LLM self-consistency 的类比):模型不给 per-轨迹分数,但其 i.i.d. 扩散样本的"共识"稳定打败任意单样本。
-- 最终叙事:"Alpamayo 部署的 first-sample 留了 ~50% 可恢复选择误差;MBR/共识选择免费捞回 **16–19%**;手设计的 reasoning-aware 看着 promising(n=9)但 scale 到 300 后归零——一个不被小样本骗的 cautionary tale。"
-- 下一步:① 给报告加 bootstrap CI(坐实显著);② 真·medoid 变体(min 两两距离和)对比质心;③(可选)learned reranker 试图打败 MBR;④ 3–5 个 case study + `interview_summary.md`。
+脚本链路:
 
-## 明日要跑的命令
+1. `01b_build_val_subset.py` — 官方 val + 传感器过滤 + 分层抽样 → 片单 [CPU]
+2. `01_prepare_subset.py` — → manifest [CPU]
+3. `02_run_baseline_inference.py --num-traj-samples 5` — 多候选预测+轨迹 [GPU]
+4. `03c_oracle_gap.py` — oracle gap 分解 [CPU]
+5. `04_rerank.py` — aware/blind/consensus 选择器 + bootstrap CI [CPU]
+6. `05_case_studies.py` — win/loss 案例 + 轨迹图 [CPU]
 
-```bash
-# 1) 本地(电脑端)推送
-git add scripts/04_rerank.py docs/PROGRESS.md
-git commit -m "feat: reasoning-aware/blind reranker + progress doc"
-git push origin main
+一键 1–3:`run_baseline.sh`(`N=` 控制 clip 数,`RUN=` 命名,`LIMIT=` 冒烟)。
 
-# 2) 服务器:拉取 + 在现有 60 clip 上跑 reranker  [CPU，秒级]
-git pull origin main
-python scripts/04_rerank.py --run-name val_cand5
-```
+**必知的坑:**
+- `export HF_HUB_DISABLE_XET=1` 必须设,否则下载/流式得 0 字节(集群连不上 Xet)。已写死在 `run_baseline.sh`。
+- 别设 `HF_HOME`(token 会被指到错路径 → 401);下载位置用 `--cache-dir`,token 留默认登录处。
+- 现有产出在 `outputs/runs/val_cand5_n300/`(**gitignore,不进仓库**):`baseline/`(预测+轨迹+GT)、`analysis/`(oracle_gap / rerank_report / rerank_selection / case_studies)、`figures/`。60-clip 旧 run 在 `outputs/runs/val_cand5/`。
 
-看 `outputs/runs/val_cand5/analysis/rerank_report.json`:
+## 4. 已完成 / 当前位置
 
-- `overall.aware_gap_closed_ade_pct` > 0 且 `aware_vs_first` 多赢少输 → reranker 有效。
-- `stop_yield_subset.aware_vs_blind` 多赢 → **reasoning 真的帮上忙(faithfulness 证据)**,核心卖点。
-- 若 aware ≈ blind → reasoning 没加成;as-is 报告,或调 `score_aware` 权重再试。
+- ✅ A 全部完成:复现、数据、管线、oracle 诊断、consensus 显著结果、reasoning-aware 负结果、bootstrap CI、case study、`docs/interview_summary.md`。
+- ⬜ **B = learned reranker(下一步,新会话主题)。**
 
-确认有效后,**scale 到 300 出正式数**  [GPU，~1h，你有 48h 卡]:
+## 5. B 交接 brief:learned reranker(Tier 2)
 
-```bash
-N=300 RUN=val_cand5_n300 bash scripts/run_baseline.sh       # [GPU]
-python scripts/03c_oracle_gap.py --run-name val_cand5_n300   # [CPU]
-python scripts/04_rerank.py      --run-name val_cand5_n300   # [CPU]
-```
+**核心问题:** 一个学出来的小评分器,能不能打败**免费的 MBR/consensus**?
 
-## 管线(脚本链路)
+**用什么数据:** 现有 `outputs/runs/val_cand5_n300/baseline/`(300 clip × 5 候选,预测+轨迹+GT)。**不需要再跑 GPU**——用 leave-one-clip-out CV 即可。
 
-1. `01b_build_val_subset.py` → val 片单(官方 val + 传感器过滤 + 分层)  [CPU]
-2. `01_prepare_subset.py` → manifest  [CPU]
-3. `02_run_baseline_inference.py --num-traj-samples 5` → 多候选预测+轨迹  [GPU]
-4. `03_compute_metrics.py` → 每候选 ADE/FDE + 一致性(可选)  [CPU]
-5. `03c_oracle_gap.py` → Gate B:oracle vs first-sample 选择误差  [CPU]
-6. `04_rerank.py` → aware/blind reranker + 评测(关掉多少 gap)  [CPU]
+**做法:**
+- 候选特征:`04_rerank.py::candidate_features`(末速 / speed_delta / jerk / heading / lateral)+ **到共识的距离**(已知有信号)。
+- 标签:该候选是否 ADE 最低(分类)或回归 ADE。
+- LOO-CV:每个 clip 用其余 299 训一个小模型(逻辑回归 / GBM),预测这 5 条的分,选 argmax,评 ADE。
+- 对比 first / **MBR** / oracle,带 bootstrap CI + vs-MBR 输赢(直接复用 `04` 的 `bootstrap_improvement`)。
 
-一键前三步:`run_baseline.sh`(`N=` 控制 clip 数,`LIMIT=` 做冒烟测试)。
+**诚实预期(务必先想清楚):** 已证明廉价动力学 / intent 特征**不带选择信号**(aware/blind 全 null)。所以 learned-over-cheap-features **很可能 ≈ MBR、打不过**——这本身是干净结论("MBR 已接近廉价特征选择的天花板")。**想真正打败 MBR,需要更 richer 的特征**(视觉 / 场景 embedding,或模型 hidden states),那是更大的工程。新会话开工前先决定:接受"learned≈MBR"的确认性结论,还是投入 richer 特征去搏一把。
 
-## 关键事实备忘(踩过的坑)
+**关键文件:** `scripts/04_rerank.py`(`candidate_features` / 质心逻辑 / `bootstrap_improvement`)、`faithful_vla/metrics.py`(`compute_trajectory_metrics` / `parse_intents`)、`faithful_vla/run_paths.py`(输出路径)。
 
-- **流式不占盘**:推理按 clip 流式取图(4 相机 × 4 帧,1080×1920),不写硬盘;每次跑重新拉(网络),单 clip 解码后几百 MB 内存瞬时。所以 300 甚至全量都不占配额。
-- **Xet 必须禁用**:`export HF_HUB_DISABLE_XET=1`,否则下载/流式得到 0 字节(集群连不上 Xet 端点)。已写死在 `run_baseline.sh`。
-- **HF token 坑**:别设 `HF_HOME`(会把 token 路径指到错地方 → 401);要控制下载位置用 `--cache-dir` 或 `HF_HUB_CACHE`,token 留默认。
-- **数据没有 `vla_golden.parquet`**:索引是 `clip_index.parquet`(clip_is_valid/chunk/split);元数据 `metadata/data_collection.parquet`(country/month/hour_of_day/platform_class/radar_config)+ `feature_presence.parquet`(各传感器存在标志)。三表等长同序,**clip_id 是元数据表的索引**(UUID)。
-- **模型**:`nvidia/Alpamayo-1.5-10B`,bf16,`attn_implementation=sdpa`(flash-attn 编不了),单 H100 够。
-- **官方 split**:train 153625 / val 90928 / test 61599。
+## 6. 面试叙事(详见 `interview_summary.md`)
 
-## 路线图(Tier)与当前位置
+- 正面:"Alpamayo 部署的 first-sample 留 ~47% 可恢复选择误差;免费 MBR/共识选择显著捞回 ~16%/22%,因为扩散样本无内部分数。"
+- 负面(加分项):reasoning-aware 在 n=9 看着 +24%,scale 到 300 后归零/转负——靠 scale 亲手杀掉假阳性。
+- 不声称:改生成 / 微调 10B / 世界模型 / RLHF。
 
-- **Tier 0(必交)**:✅ oracle-gap 分解 + 失效分析骨架 + 数据/管线。← 已具备
-- **Tier 1(进行中)**:reasoning-aware vs blind reranker + 评测。← **明日推进**
-- **Tier 2(有时间)**:极小 learned reranker(逻辑回归,<10 特征,leave-one-clip-out CV);置信门控"介入率 vs 改善"曲线。
-- **Tier 3(按需)**:保守 speed-profile adapter(仅高置信 stop/yield,只调沿轨迹速度 profile,不改 lateral)。
+## 7. 简要决策日志
 
-## 面试 caveats(主动说,体现严谨)
+- 否定 LoRA/RLHF/重型世界模型:资源不够 + 靶子不对(oracle 证明瓶颈是**选择**,不是生成;10B 生成已够好)。
+- Gate B(oracle gap)绿灯:选择误差 57%(n=60)/ 47%(n=300)。
+- reranker:手调启发式 n=60 平局 → 加 consensus → n=300 **consensus 显著、aware null**;n=9 的 stop/yield 正信号被 n=61 证伪。
 
-- oracle 用 GT,是**上界**;reranker 抓不到全部,但 57% 头顶空间意味着抓一部分就有意义。
-- n 要够:60 用于开发,**正式数用 300**,stop/yield 子集才到 ~45,结论才可信。
-- 报 per-case 输赢 + bootstrap CI + 效应量,不吹"显著提升"。
-- 多样性在轨迹动力学、不在 cot 文本——所以 reranker 用动力学特征是对的;intent 当 per-clip 先验。
-- 不声称"修复了 Alpamayo / 接了世界模型 / 做了 RLHF"。说法:"inference-time trajectory selection + 误差分解 + 轻量改进系统"。
+## 8. "300 够不够下结论?"(我的判断)
 
-## 待办 / 未来
-
-- [ ] 明日:`04_rerank` on 60 → 判定 aware vs blind、关掉多少 gap。
-- [ ] scale 300:baseline + oracle + rerank,出正式表。
-- [ ] 给 `03c` / `04` 的聚合加 bootstrap CI。
-- [ ] 3–5 个 case study 可视化(相机帧 + cot + first vs reranked 轨迹 + 速度曲线);用 `rerank_selection.jsonl` 挑改善/恶化案例。
-- [ ] (可选)置信门控 `--gate-margin` 扫描,画介入率 vs 改善。
-- [ ] 写 `docs/interview_summary.md`。
+- **总体 consensus 结论:够。** n=300 下 CI 不含 0(ADE/FDE 都显著)。
+- **reasoning-aware null:够。** CI 紧贴 0。
+- **stop/yield 子集:不够。** n=61,ADE CI 跨 0。若要把子集 ADE 做成显著结论,需总量 ~800–1500(子集→~150–300)。成本低(~1.4×、流式、不占盘),48h 卡内可行,但**非必需**。
+- **B(learned reranker,LOO-CV):300 够做首轮结论**,也够训一个简单模型;但若 learned 与 MBR 差距很小,300 难分辨,且 300 对复杂模型偏薄。要更稳就 scale 到 ~600–1000。
