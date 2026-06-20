@@ -40,6 +40,8 @@ def parse_args():
     p.add_argument("--trajectories", type=Path, default=None)
     p.add_argument("--time-step", type=float, default=0.1)
     p.add_argument("--gate-margin", type=float, default=0.0, help="Only override candidate 0 if best score beats it by > margin.")
+    p.add_argument("--bootstrap", type=int, default=2000, help="Bootstrap resamples for CIs (0 to skip).")
+    p.add_argument("--seed", type=int, default=42)
     p.add_argument("--out", type=Path, default=None)
     p.add_argument("--selection-out", type=Path, default=None)
     return p.parse_args()
@@ -109,6 +111,25 @@ def winloss(rer: list[float], base: list[float]):
     w = sum(1 for a, b in zip(rer, base) if a < b - 1e-9)
     l = sum(1 for a, b in zip(rer, base) if a > b + 1e-9)
     return {"win": w, "loss": l, "tie": len(rer) - w - l}
+
+
+def bootstrap_improvement(clips, sel_key, n_boot, seed):
+    """Paired bootstrap CI on mean (first_ade - sel_ade); positive = selector better than first-sample."""
+    import numpy as np
+    if not clips or n_boot <= 0:
+        return {}
+    d_ade = np.array([c["first_ade"] - c[sel_key + "_ade"] for c in clips], dtype=float)
+    d_fde = np.array([c["first_fde"] - c[sel_key + "_fde"] for c in clips], dtype=float)
+    rng = np.random.default_rng(seed); n = len(clips)
+
+    def ci(d):
+        idx = rng.integers(0, n, size=(n_boot, n))
+        means = d[idx].mean(axis=1)
+        return {"mean_improve_m": round(float(d.mean()), 4),
+                "ci95": [round(float(np.percentile(means, 2.5)), 4), round(float(np.percentile(means, 97.5)), 4)],
+                "frac_better": round(float((means > 0).mean()), 3)}
+
+    return {"ade": ci(d_ade), "fde": ci(d_fde)}
 
 
 def analyze(clips: list[dict[str, Any]]) -> dict[str, Any]:
@@ -196,15 +217,21 @@ def main() -> int:
             "sample_id": sid, "intents": sorted(intents), "cot": c0["cot"],
             "first_tid": c0["tid"], "aware_tid": cands[aware_idx]["tid"], "oracle_tid": cands[oracle_idx]["tid"],
             "first_ade": round(c0["ade"], 3), "aware_ade": round(cands[aware_idx]["ade"], 3),
+            "centroid_tid": cands[centroid_idx]["tid"], "centroid_ade": round(cands[centroid_idx]["ade"], 3),
             "oracle_ade": round(cands[oracle_idx]["ade"], 3),
             "aware_scores": [round(s, 3) for s in aware_scores],
         })
 
     sy = [c for c in clips if set(c["intents"]) & STOP_LIKE]
+    sig_overall = {"centroid": bootstrap_improvement(clips, "centroid", a.bootstrap, a.seed),
+                   "aware": bootstrap_improvement(clips, "aware", a.bootstrap, a.seed)}
+    sig_sy = {"centroid": bootstrap_improvement(sy, "centroid", a.bootstrap, a.seed),
+              "aware": bootstrap_improvement(sy, "aware", a.bootstrap, a.seed)} if sy else {}
     report = {"run_name": a.run_name, "split": a.split, "num_clips": len(clips),
               "candidates_per_clip": round(_mean([len(v) for v in groups.values()]), 2) if groups else 0,
-              "gate_margin": a.gate_margin,
-              "overall": analyze(clips), "stop_yield_subset": analyze(sy)}
+              "gate_margin": a.gate_margin, "bootstrap": a.bootstrap,
+              "overall": analyze(clips), "stop_yield_subset": analyze(sy),
+              "significance_overall": sig_overall, "significance_stop_yield": sig_sy}
     print(json.dumps(report, indent=2))
 
     out = a.out or (Path("outputs/runs") / a.run_name / "analysis" / "rerank_report.json" if a.run_name else None)

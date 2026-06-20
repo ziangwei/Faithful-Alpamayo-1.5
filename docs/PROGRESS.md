@@ -39,8 +39,18 @@
 
 - 全 val:aware 关掉 gap **-1.8% ADE**(平局偏负),胜负 22:28;**aware ≈ blind**(57/60 选一样)→ intent 几乎没改变选择。
 - stop/yield(n=9):aware 关掉 **24% ADE**、20% FDE,5 赢 3 输——目标场景有信号但 n 太薄。
-- 判断:**手调启发式弱**。下一步两条路:① **质心/consensus 选择**(免费、有原则,已加进 `04_rerank.py`,待 60 clip 重跑验证);② **learned reranker**(Tier 2,train split 上训小模型)。先看质心结果再决定。
-- 成本澄清:多候选 = 1×VLM rollout + 5×廉价扩散采样,**非 5× 全推理**(~13s/clip 出 5 条为证);性价比顾虑大概率不成立,待 `--num-traj-samples 1` 计时确认。
+- 判断:**手调启发式弱;质心也不行**——质心 overall 仅 +5.6% 但胜负 25:24(掷硬币),stop/yield **-11.6%(更差)**。即廉价后处理选择 overall 抓不到那 57% gap。
+- **唯一亮点:stop/yield 上 aware(+24%)> blind(+16.8%)> first(0)> 质心(-11.6%)**,顺序合理——intent-aware 在安全关键场景有效、且强过 intent-blind(faithfulness 信号),但 n=9。
+- 成本已确认:1 候选 ~9s,5 候选 ~13s → 多候选仅 **~1.4×**,非 5×,性价比顾虑排除。
+- **决定:scale 到 300**,验证 stop/yield 的 aware>blind 是真信号还是 n=9 噪声(子集→~45)。然后再决定:坐实"reasoning 在 stop/yield 有用"的正面 claim / 转成诊断叙事 / 上 learned reranker。
+
+### n=300 决定性结果(2026-06-20)— 项目主线确定
+
+- **reasoning-aware 启发式被证伪**:overall ADE -0.8%、stop/yield **-12.9%**(n=9 的 +24% 是小样本噪声,scale 后归零转负)。`aware ≈ blind` 处处成立 → intent 不改变选择。**"reasoning 帮选轨迹"的正面 claim 死亡**(诚实负结果;亲手 scale 杀掉自己的假阳性 = 面试强加分)。
+- **真正有效:consensus/质心(MBR)选择。** overall ADE gap 关掉 **+16.4%**(胜负 148:89)、FDE ~22%;stop/yield ADE **+18.7%**(29:18)、FDE ~31%。overall 与子集一致为正,n=300 下基本显著。**零训练、零额外推理、有原则。**
+- **这是项目正面主线**,框架名 = **Minimum Bayes Risk / self-consistency 选择**(轨迹版,LLM self-consistency 的类比):模型不给 per-轨迹分数,但其 i.i.d. 扩散样本的"共识"稳定打败任意单样本。
+- 最终叙事:"Alpamayo 部署的 first-sample 留了 ~50% 可恢复选择误差;MBR/共识选择免费捞回 **16–19%**;手设计的 reasoning-aware 看着 promising(n=9)但 scale 到 300 后归零——一个不被小样本骗的 cautionary tale。"
+- 下一步:① 给报告加 bootstrap CI(坐实显著);② 真·medoid 变体(min 两两距离和)对比质心;③(可选)learned reranker 试图打败 MBR;④ 3–5 个 case study + `interview_summary.md`。
 
 ## 明日要跑的命令
 
