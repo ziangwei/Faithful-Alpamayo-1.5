@@ -104,4 +104,8 @@ python scripts/08_train_verifier.py --run-name val_cand5_n1000 \
 **对策二(正解,需 GPU 重 dump)**:`02 --dump-expert-hidden` —— 抽扩散 expert 的 `last_hidden_state`(形状 `(候选数, H)`,**每条候选不同**),是模型对每条候选的内部表示,线性可直接利用、绕开 shared 限制。存 `<split>_expert.npz`,`08 --scene <split>_expert.npz` 自动按"逐候选 2D 特征"处理。**这才是真正可能赢 MBR 的一手。**
 > 假设:expert 的 batch 行序 = `trajectory_sample_id`;运行时打印形状供核对(行数应 == 每 clip 候选数;不对就用 `--expert-module` 调整)。
 
-不声称已跑出正结果。当前诚实状态:naive 共享 hidden 会过拟合伤害(已诊断清楚),两手对策(降维 / 逐候选)代码与测试就绪,等服务器各跑一次见分晓。
+**两手对策的真实结果(n=1000,均已跑):**
+- ① `--scene-pca 24`:降维**没救回来**,仍显著伤害(scene 边际 −0.092)→ 共享 scene 死透。
+- ② `--dump-expert-hidden`(逐候选 expert hidden,dim=2048,fresh run):**无信号**(scene 边际 −0.042,CI[−0.10, 0.01] 跨 0;`verdict = "scene adds NO signal beyond geometry"`)。geom head 这次还略胜 MBR(31.3% vs 29.6%,CI 含 0)。
+
+**最终结论(钉死)**:hidden-state verifier 这条线**整体为负/无效**。根因是系统层面的:**模型对自己 i.i.d. 的扩散样本不暴露任何 per-sample 质量分**,所以任何基于其几何或内部激活的 reranker 都注定 ≈ 或输免费 MBR。这不是没试够,是模型构造决定的天花板。要真超过,只能换信号源(训模型给样本打分 / 闭环或人工 reward),属另一个更大的项目。

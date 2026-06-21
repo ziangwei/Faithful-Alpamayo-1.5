@@ -68,7 +68,8 @@
 - 🔑 **三重印证(纯几何选择见顶)**:B-ridge(线性,*喂*共识特征)**追平** MBR;B-logreg(分类)**反噬**;C-set-net(非线性,*自学*聚合)**显著输**。三种独立学习方法都打不过免费均值共识 → **几何选择在 MBR 见顶**,唯一杠杆是模型内部场景表征。
 - 🚀 **2.0 verifier head 已跑(n=1000):naive 共享 scene 反而显著伤害。** geom head 精确追平 MBR(26.28% vs 26.35%),但 geom+scene(4096 维 VLM hidden,**候选共享**)**显著输 MBR、且显著差于 geom-only**(scene 边际 −0.053,CI[−0.10,−0.01],frac 0.008)→ `verdict_scene_marginal = "scene HURTS"`。诊断:4096 维 shared 特征 + 1000 clip 过拟合;且共享向量只能靠 geom×scene 交互起作用(线性头里直接抵消),信号被放在最难用、最易翻车的位置。
 - 🔧 **针对性两手已加(代码+测试就绪):** ① `08 --scene-pca K` —— label-free PCA 把 scene 降到 K 维治过拟合(CPU,复用现有 dump);② `02 --dump-expert-hidden` —— 抽**逐候选**的扩散 expert hidden(`expert_out_base.last_hidden_state`,每条候选不同 → 线性可直接用,绕开 shared 限制),`08` 自动识别 2D 逐候选特征。测试:`tests/test_train_verifier.py`(6,含 PCA + 逐候选)+ `tests/test_dump_hidden.py`(8,含 ExpertCapture)全过。`05` 已升级双栏图。
-- 📋 **下一步**:服务器跑 `08 --scene val_hidden.npz --scene-pca 24`(CPU,验证降维是否把"伤害"拉回"打平");以及 `02 … --dump-expert-hidden`(GPU 重跑)产 `val_expert.npz` → `08 --scene val_expert.npz`(逐候选,真正可能赢 MBR 的一手)。
+- ✅ **2.0 全部跑完 —— 内部状态也救不了 MBR(结论钉死)。** ① `--scene-pca 24`:降维**没救回来**,仍显著伤害(scene 边际 −0.092)→ 共享 scene 死透。② `--dump-expert-hidden`(逐候选 expert hidden,dim=2048,fresh run `val_cand5_n1000_expert`):**无信号**(scene 边际 −0.042,CI[−0.10, 0.01] 跨 0;`verdict = "scene adds NO signal beyond geometry"`),geom 这次还略胜 MBR(31.3% vs 29.6%,CI 含 0)。
+- 🧱 **根因(系统层面,最强收尾证据)**:模型对自己 i.i.d. 的扩散样本**不暴露任何 per-sample 质量分**(扩散采样器无 likelihood;VLM logprob 只评几乎相同的 CoT)。因此**任何**基于其几何/激活的 reranker 都注定 ≈ 或输 MBR —— 这不是"没试够",是**模型构造决定的天花板**。要再上去只能换信号源(训模型给样本打分 / 闭环或人工 reward),属另一个大项目。
 
 ## 5. B 交接 brief:learned reranker(Tier 2)
 
